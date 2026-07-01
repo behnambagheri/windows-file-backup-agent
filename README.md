@@ -2,14 +2,14 @@
 
 [![CI](https://github.com/behnambagheri/windows-file-backup-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/behnambagheri/windows-file-backup-agent/actions/workflows/ci.yml)
 
-backup-agent is a self-contained Windows backup agent. It watches a source directory on a cron schedule, uploads matching files over SSH/SFTP, writes local logs, and supports compression, retention policies, Telegram/email notifications, notification fallback, and Prometheus metrics.
+backup-agent is a self-contained Windows backup agent for scheduled SSH/SFTP uploads. It can watch multiple configured sources, upload matching files or whole directories, compress before upload, apply source retention, send Telegram/email notifications with fallback, expose Prometheus metrics, and continue running after Windows restarts.
 
 The installed name stays `backup-agent` everywhere:
 
 - install directory: `C:\ProgramData\backup-agent`
 - Scheduled Task name: `backup-agent`
 - PowerShell command: `backup-agent`
-- config file: `C:\ProgramData\backup-agent\.env`
+- config file: `C:\ProgramData\backup-agent\config.yaml`
 - log file: `C:\ProgramData\backup-agent\logs\agent.log`
 
 ## Download
@@ -27,14 +27,14 @@ $actual = (Get-FileHash .\backup-agent-windows.zip -Algorithm SHA256).Hash.ToLow
 if ($actual -ne $expected) { throw "SHA256 verification failed" }
 ```
 
-The release archive includes everything required at runtime; Node.js does not need to be installed on the destination Windows machine.
+The release archive includes the portable Node.js runtime and all runtime dependencies. Node.js does not need to be installed on the destination Windows machine.
 
-## Release Package Contents
+## Package Contents
 
 - `node\`: bundled portable Node.js runtime.
 - `app\`: the agent code and runtime dependencies.
 - `backup-agent.cmd`: PowerShell/CMD command launcher.
-- `.env.example`: complete configuration template.
+- `config.yaml.example`: complete commented YAML configuration template.
 - `install.ps1`: installs the agent, registers the Scheduled Task, and adds the command to PATH.
 - `uninstall.ps1`: removes the Scheduled Task and PATH entry, and optionally removes config/log/state files.
 - `README.md`: this guide.
@@ -43,8 +43,8 @@ The release archive includes everything required at runtime; Node.js does not ne
 ## Install
 
 1. Download and extract `backup-agent-windows.zip` on the Windows server.
-2. Copy `.env.example` to `.env`.
-3. Edit `.env` and set the source, destination, SSH auth, schedule, and notification values.
+2. Copy `config.yaml.example` to `config.yaml`.
+3. Edit `config.yaml` and set destination, SSH auth, sources, schedule, and notifications.
 4. Open PowerShell as Administrator in the extracted folder.
 5. Run:
 
@@ -55,7 +55,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 By default the installer creates a Scheduled Task named `backup-agent` that runs as `SYSTEM` at boot. This keeps the agent running after a restart, even before a user logs in.
 
-If the source folder, proxy, or network access only works inside the current Windows user session, install it as the current user instead:
+If the source folder, proxy, or network access only works inside the current Windows user session, install it as the current user:
 
 ```powershell
 .\install.ps1 -RunAs CurrentUser
@@ -66,9 +66,10 @@ The installer adds `C:\ProgramData\backup-agent` to PATH. Open a new PowerShell 
 ```powershell
 backup-agent status
 backup-agent health
-backup-agent logs
 backup-agent logs -f
 ```
+
+Upgrades preserve an existing `config.yaml`. If an older installation only has `.env`, the agent can still read it as a legacy fallback, but new installs use YAML.
 
 ## Commands
 
@@ -82,7 +83,7 @@ backup-agent logs --lines 200
 backup-agent start
 backup-agent stop
 backup-agent restart
-backup-agent edit-env
+backup-agent edit-config
 backup-agent metrics status
 backup-agent metrics enable --port 9108 --firewall
 backup-agent metrics disable
@@ -99,90 +100,63 @@ backup-agent uninstall --remove-data
 backup-agent version
 ```
 
-`edit-env` opens the active `.env` in elevated Notepad and creates it from
-`.env.example` when it does not exist.
-
-The test commands use the current `.env` settings. Telegram and email tests send
-a real diagnostic message even when their notification mode is `off`.
-`test destination` connects over SSH/SFTP, ensures `DEST_REMOTE_DIR` exists,
-writes and verifies a temporary file there, and removes the file afterward.
-The aliases `test-telegram`, `test-email`, and `test-destination` are also available.
+`edit-config` opens the active config file in elevated Notepad. `edit-env` is still accepted as a compatibility alias. Telegram and email test commands send a real diagnostic message even when their notification mode is `off`. The destination test connects over SSH/SFTP, ensures the remote directory exists, writes/verifies a temporary file, and removes it.
 
 Run `start`, `stop`, `restart`, `update`, and `uninstall` from an elevated PowerShell window when the task was installed as `SYSTEM`.
 
-## Config
+## YAML Config
 
 The installed config file is:
 
 ```text
-C:\ProgramData\backup-agent\.env
+C:\ProgramData\backup-agent\config.yaml
 ```
 
-The packaged `.env.example` documents every supported setting, allowed value,
-default behavior, and common example. Never commit a real `.env` because it may
-contain SSH, Telegram, SMTP, and proxy credentials.
+The packaged `config.yaml.example` documents every supported setting, allowed value, default behavior, and common example. Never commit a real `config.yaml` because it may contain SSH, Telegram, SMTP, and proxy credentials.
 
-Important keys:
+Minimal shape:
 
-```dotenv
-CRON_SCHEDULE=0 */5 * * * *
-HOSTNAME=
-PROXY_URL=socks5://127.0.0.1:1080
-UPDATE_URL=https://github.com/behnambagheri/windows-file-backup-agent/releases/latest/download/backup-agent-windows.zip
-UPDATE_USE_PROXY=false
-METRICS_ENABLED=false
-METRICS_HOST=0.0.0.0
-METRICS_PORT=9108
-METRICS_PATH=/metrics
-METRICS_FIREWALL_RULE=false
-METRICS_FIREWALL_RULE_NAME=backup-agent metrics
-DEST_HOST=192.0.2.10
-DEST_PORT=22
-DEST_USER=backup-user
-DEST_REMOTE_DIR=/backups
-CREATE_DESTINATION_DIR=false
-DESTINATION_DIR_FORMAT=date
-DEST_AUTH_METHOD=password
-DEST_PASSWORD=change-me
-DEST_PRIVATE_KEY_BASE64=
-DESTINATION_USE_PROXY=false
+```yaml
+schedule:
+  cron: '0 */5 * * * *'
 
-SOURCE_DIR=C:\Backups
-SOURCE_FILE_PATTERN=*.bak
-SOURCE_LATEST_ONLY=true
-DELETE_SOURCE_ON_SUCCESS=false
-COMPRESSION=false
-RETENTION_POLICY=off
-RETENTION_TIME=1d
-RETENTION_COUNT=2
-SKIP_ALREADY_TRANSFERRED=true
+proxy:
+  url: 'socks5://127.0.0.1:1080'
 
-TELEGRAM_MODE=failures
-TELEGRAM_FALLBACK=off
-TELEGRAM_API_URL=https://api.telegram.org
-TELEGRAM_USE_PROXY=false
-TELEGRAM_BOT_TOKEN=
-TELEGRAM_CHAT_ID=
-TELEGRAM_TOPIC_ID=
+destination:
+  host: '192.0.2.10'
+  port: 22
+  user: backup-user
+  remote_dir: /backups
+  auth_method: password
+  password: change-me
+  use_proxy: false
 
-EMAIL_MODE=off
-EMAIL_FALLBACK=off
-EMAIL_USE_PROXY=false
-SMTP_HOST=smtp.example.com
-SMTP_PORT=465
-SMTP_SSL=true
-SMTP_USER=
-SMTP_PASSWORD=
-EMAIL_FROM=backup-agent@example.com
-EMAIL_TO=admin@example.com
+sources:
+  defaults:
+    mode: files
+    source_file_pattern: '*.bak'
+    latest_only: true
+    min_age_seconds: 10
+    delete_on_success: false
+    compression: false
+    retention_policy: off
+    retention_time: 1d
+    retention_count: 2
+    skip_already_transferred: true
+  items:
+    - name: database_backups
+      source_dir: 'C:\Backups\Database'
+    - name: application_data
+      mode: directory
+      source_dir: 'D:\AppData\ImportantFolder'
+      compression: true
+      retention_policy: off
 ```
 
-Use `PROXY_URL` once for the shared SOCKS proxy address, then enable it only
-where needed with `UPDATE_USE_PROXY`, `DESTINATION_USE_PROXY`,
-`TELEGRAM_USE_PROXY`, and `EMAIL_USE_PROXY`. Boolean values accept `true`,
-`false`, `on`, and `off`.
+`sources.defaults` is the global source policy. Every entry in `sources.items` inherits those values unless the entry overrides them.
 
-`CRON_SCHEDULE` uses six fields:
+`schedule.cron` uses six fields:
 
 ```text
 second minute hour day-of-month month day-of-week
@@ -194,77 +168,65 @@ Examples:
 - `0 0 * * * *`: every hour.
 - `0 30 2 * * *`: every day at 02:30.
 
-## Hostname
+## Source Modes
 
-Set this when you want notifications and destination folders to use a custom machine name:
+`mode: files` selects files directly inside `source_dir` that match `source_file_pattern`. It does not recurse into subdirectories. If `latest_only` is true, only the newest matching file by modified time is uploaded.
 
-```dotenv
-HOSTNAME=sql-prod-01
+`mode: directory` treats `source_dir` itself as one transfer item. With `compression: true`, the directory is uploaded as a `.tar.gz` archive. With `compression: false`, the directory is uploaded recursively over SFTP into a remote folder named after the local directory.
+
+`delete_on_success: true` deletes the uploaded source file in file mode. In directory mode, it deletes the whole local source directory only after the complete upload succeeds.
+
+`skip_already_transferred: true` records successful transfer fingerprints in `state\transferred.json` and skips unchanged items on future cycles.
+
+## Destination Folders
+
+Enable dynamic destination folders:
+
+```yaml
+destination:
+  remote_dir: /backups
+  create_dir: true
+  dir_format: hostname+date
 ```
 
-If `HOSTNAME` is empty, backup-agent uses the Windows machine hostname.
+Accepted `dir_format` values:
 
-## Destination Subdirectories
+- `date`: uploads into `/backups/YYYY-MM-DD_HH-mm-ss`
+- `hostname`: uploads into `/backups/hostname`
+- `hostname+date`: uploads into `/backups/hostname/YYYY-MM-DD_HH-mm-ss`
 
-Set:
-
-```dotenv
-CREATE_DESTINATION_DIR=true
-DESTINATION_DIR_FORMAT=hostname+date
-```
-
-Accepted formats:
-
-- `date`: uploads into `DEST_REMOTE_DIR/YYYY-MM-DD_HH-mm-ss`
-- `hostname`: uploads into `DEST_REMOTE_DIR/hostname`
-- `hostname+date`: uploads into `DEST_REMOTE_DIR/hostname/YYYY-MM-DD_HH-mm-ss`
-
-Example:
-
-```dotenv
-DEST_REMOTE_DIR=/backups
-HOSTNAME=sql-prod-01
-CREATE_DESTINATION_DIR=true
-DESTINATION_DIR_FORMAT=hostname+date
-```
-
-The uploaded file goes to a path like:
-
-```text
-/backups/sql-prod-01/2026-07-01_13-45-20/database.bak
-```
+Set `app.hostname` when you want a custom name in notifications and destination folders. If it is empty, backup-agent uses the Windows machine hostname.
 
 ## Compression
 
-Set this in `.env`:
+Compression is configured per source:
 
-```dotenv
-COMPRESSION=true
+```yaml
+sources:
+  items:
+    - name: database_backups
+      source_dir: 'C:\Backups\Database'
+      compression: true
 ```
 
-When enabled, backup-agent compresses each selected source file with gzip level 9 before upload. A file named `database.bak` is uploaded as `database.bak.gz`. The temporary compressed file is stored under the local state directory and deleted after the transfer attempt.
-
-`DELETE_SOURCE_ON_SUCCESS=true` still deletes the original source file only after the upload succeeds.
+File mode uses gzip level 9 and uploads `database.bak` as `database.bak.gz`. Directory mode uses tar plus gzip level 9 and uploads `ImportantFolder.tar.gz`. Temporary compressed files are stored under the local state directory and removed after the transfer attempt.
 
 ## Retention
 
-Set:
+Retention is configured per source and applies only to `mode: files` sources:
 
-```dotenv
-RETENTION_POLICY=off
+```yaml
+sources:
+  items:
+    - name: database_backups
+      source_dir: 'C:\Backups\Database'
+      retention_policy: time
+      retention_time: 1d
 ```
 
-`off` disables retention cleanup.
+Supported `retention_time` units:
 
-To delete matching source files older than one day:
-
-```dotenv
-RETENTION_POLICY=time
-RETENTION_TIME=1d
-```
-
-Supported `RETENTION_TIME` units:
-
+- `s`: seconds, for example `30s`
 - `m`: minutes, for example `60m`
 - `h`: hours, for example `12h`
 - `d`: days, for example `1d` or `7d`
@@ -272,26 +234,52 @@ Supported `RETENTION_TIME` units:
 
 To keep only the newest 2 matching files:
 
-```dotenv
-RETENTION_POLICY=count
-RETENTION_COUNT=2
+```yaml
+sources:
+  items:
+    - name: database_backups
+      source_dir: 'C:\Backups\Database'
+      retention_policy: count
+      retention_count: 2
 ```
 
-Retention only applies to files matching `SOURCE_FILE_PATTERN`. Time retention uses the source file modified time. Count retention sorts by modified time and keeps the newest N files. If a file was selected for upload and that upload failed, retention keeps that file even when it would otherwise be deleted.
+Retention only deletes files matching that source's `source_file_pattern`. If a file was selected for upload and that upload failed, retention keeps it even when it would otherwise be deleted.
 
-Legacy configs using `RETENTION_MINUTES=1440` still work and are treated as `RETENTION_POLICY=time`.
+## Proxy
+
+Define the shared SOCKS proxy once:
+
+```yaml
+proxy:
+  url: 'socks5://127.0.0.1:1080'
+```
+
+Then enable it only where needed:
+
+```yaml
+update:
+  use_proxy: false
+destination:
+  use_proxy: false
+notifications:
+  telegram:
+    use_proxy: false
+  email:
+    use_proxy: false
+```
 
 ## Prometheus Metrics
 
-Enable metrics in `.env`:
+Enable metrics in YAML:
 
-```dotenv
-METRICS_ENABLED=true
-METRICS_HOST=0.0.0.0
-METRICS_PORT=9108
-METRICS_PATH=/metrics
-METRICS_FIREWALL_RULE=true
-METRICS_FIREWALL_RULE_NAME=backup-agent metrics
+```yaml
+metrics:
+  enabled: true
+  host: '0.0.0.0'
+  port: 9108
+  path: /metrics
+  firewall_rule: true
+  firewall_rule_name: backup-agent metrics
 ```
 
 When enabled, scrape:
@@ -318,45 +306,61 @@ backup-agent firewall add --port 9108
 backup-agent firewall remove
 ```
 
-`install.ps1` creates or updates the Windows Firewall inbound rule when both `METRICS_ENABLED=true` and `METRICS_FIREWALL_RULE=true` are set in `.env`.
+`install.ps1` creates or updates the Windows Firewall inbound rule when both `metrics.enabled: true` and `metrics.firewall_rule: true` are set. Metrics include process uptime, memory, transfer cycle status, per-source transfer counters, uploaded bytes, source directory availability, matching item counts, oldest matching item age, compression flags, and retention settings.
 
-Example Prometheus scrape config:
+## Notifications
+
+Telegram and email support `off`, `all`, `success`, and `failures` modes:
 
 ```yaml
-scrape_configs:
-  - job_name: backup-agent
-    static_configs:
-      - targets:
-          - server-ip:9108
+notifications:
+  telegram:
+    mode: failures
+    fallback: email
+    bot_token: ''
+    chat_id: ''
+    topic_id: ''
+  email:
+    mode: off
+    fallback: telegram
+    smtp_host: smtp.example.com
+    smtp_port: 465
+    smtp_ssl: true
+    from: backup-agent@example.com
+    to:
+      - admin@example.com
 ```
 
-The endpoint exposes process uptime, memory, transfer cycle counters, successful/failed file counters, uploaded bytes, last-cycle status and duration, source directory availability, matching file count, oldest matching file age, and active config flags.
+When an enabled channel fails, backup-agent tries its configured fallback even if the fallback channel's normal mode is `off`. The fallback channel must still have valid credentials. Failures never recurse between Telegram and email.
+
+Success and failure messages include source host, source IP addresses, configured source name, source file or directory path, compression status, original/upload size, destination host/IP, destination remote path, error message when failed, and event time.
 
 ## Update
 
-Set:
+Default update URL:
 
-```dotenv
-UPDATE_URL=https://github.com/behnambagheri/windows-file-backup-agent/releases/latest/download/backup-agent-windows.zip
-UPDATE_USE_PROXY=false
+```yaml
+update:
+  url: 'https://github.com/behnambagheri/windows-file-backup-agent/releases/latest/download/backup-agent-windows.zip'
+  use_proxy: false
 ```
 
-Then run:
+Run:
 
 ```powershell
 backup-agent update
 ```
 
-The update command downloads the zip, extracts it, stops the Scheduled Task, installs the downloaded version into the current install directory, and starts the task again. The command creates an elevated PowerShell updater, so Windows may show a UAC prompt.
-Set `UPDATE_USE_PROXY=true` to download through `PROXY_URL`.
+The update command downloads the zip, extracts it, stops the Scheduled Task, installs the downloaded version into the current install directory, and starts the task again. Windows may show a UAC prompt because the updater runs elevated.
 
 ## Private Key Auth
 
 Set:
 
-```dotenv
-DEST_AUTH_METHOD=private_key
-DEST_PRIVATE_KEY_BASE64=...
+```yaml
+destination:
+  auth_method: private_key
+  private_key_base64: ''
 ```
 
 Create the base64 value in PowerShell:
@@ -365,76 +369,27 @@ Create the base64 value in PowerShell:
 [Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\path\id_rsa"))
 ```
 
-If the private key has a passphrase, put it in `DEST_PASSWORD`.
+If the private key has a passphrase, put it in `destination.password`.
 
 ## Logs And State
 
-Logs:
-
 ```text
 C:\ProgramData\backup-agent\logs\agent.log
-```
-
-State:
-
-```text
 C:\ProgramData\backup-agent\state\transferred.json
 ```
 
-When `SKIP_ALREADY_TRANSFERRED=true`, the state file prevents the same unchanged source file from uploading again if `DELETE_SOURCE_ON_SUCCESS=false`.
-
-## Manual Test
-
-After editing `.env`, run one transfer cycle manually:
+Manual test flow:
 
 ```powershell
-cd C:\ProgramData\backup-agent
+backup-agent health
+backup-agent test destination
+backup-agent test telegram
+backup-agent test email
 backup-agent run-once
-```
-
-Check the log afterward:
-
-```powershell
 backup-agent logs --lines 50
 ```
 
-Test notification delivery and destination access separately:
-
-```powershell
-backup-agent test telegram
-backup-agent test email
-backup-agent test destination
-```
-
-These tests do not transfer or delete any source backup file. The destination
-test may create the configured destination directory when it does not exist.
-
-## Telegram And Email Message Content
-
-Success and failure messages include:
-
-- source host name
-- source IP addresses
-- source file name and full path
-- compression status and upload size
-- destination host/IP
-- destination remote path
-- error message when failed
-- event time
-
-Telegram messages use readable HTML formatting. Email messages include both text and HTML versions.
-
-Cross-channel fallback is optional:
-
-```dotenv
-TELEGRAM_FALLBACK=email
-EMAIL_FALLBACK=telegram
-```
-
-When an enabled channel fails, backup-agent tries its configured fallback even
-if the fallback channel's normal mode is `off`. The fallback channel must still
-have valid credentials. A channel is not sent twice when it already succeeded,
-and failures never recurse between Telegram and email.
+The notification tests do not transfer or delete source data. The destination test may create the configured destination directory when it does not exist.
 
 ## Uninstall
 
@@ -454,7 +409,7 @@ backup-agent uninstall --remove-data
 
 ## Development
 
-Development and CI use Node.js 24 LTS. Install dependencies and run validation:
+Development and CI use Node.js 24 LTS:
 
 ```powershell
 npm ci
@@ -463,8 +418,7 @@ npm test
 npm audit --omit=dev --audit-level=high
 ```
 
-To build the self-contained package on Windows, stage the current Windows
-`node.exe` and run the packager:
+To build the self-contained package on Windows, stage the current Windows `node.exe` and run the packager:
 
 ```powershell
 New-Item -ItemType Directory -Force .runtime\windows-node | Out-Null
@@ -472,22 +426,13 @@ Copy-Item (Get-Command node).Source .runtime\windows-node\node.exe
 npm run package:win
 ```
 
-This creates `backup-agent-windows.zip` and `backup-agent-windows.sha256`.
-Generated packages, dependencies, local `.env` files, IDE metadata, logs, and
-runtime state are excluded from Git.
+This creates `backup-agent-windows.zip` and `backup-agent-windows.sha256`. Generated packages, dependencies, local `.env`/`config.yaml` files, IDE metadata, logs, and runtime state are excluded from Git.
 
 ## GitHub Actions
 
-The `CI` workflow runs syntax checks, tests, and a production dependency audit
-on Linux and Windows. After both test jobs pass, it builds and verifies the
-self-contained Windows package and stores the zip and checksum as workflow
-artifacts for 30 days.
+The `CI` workflow runs syntax checks, tests, and a production dependency audit on Linux and Windows. After both test jobs pass, it builds and verifies the self-contained Windows package and stores the zip and checksum as workflow artifacts for 30 days.
 
-Pushing a version tag such as `v1.5.0` runs the `Release` workflow. The workflow
-requires the tag to match `package.json`, rebuilds and verifies the package, and
-publishes both files to a GitHub release. `UPDATE_URL` uses the stable
-`releases/latest/download` address, so installed agents always download the
-newest published release.
+Pushing a version tag runs the `Release` workflow. The workflow requires the tag to match `package.json`, rebuilds and verifies the package, and publishes the zip and checksum to a GitHub release. The default update URL uses the stable `releases/latest/download` address, so installed agents download the newest published release.
 
 ## License
 

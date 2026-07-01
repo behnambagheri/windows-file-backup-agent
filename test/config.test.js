@@ -7,6 +7,12 @@ const { loadConfig, validateConfig } = require("../src/config");
 
 const DEFAULT_UPDATE_URL = "https://github.com/behnambagheri/windows-file-backup-agent/releases/latest/download/backup-agent-windows.zip";
 const isolatedEnvironmentKeys = [
+  "CONFIG_FILE",
+  "BACKUP_AGENT_CONFIG",
+  "ENV_FILE",
+  "AGENT_HOME",
+  "RUN_ONCE",
+  "RUN_ON_START",
   "PROXY_URL",
   "GLOBAL_PROXY_URL",
   "UPDATE_URL",
@@ -46,28 +52,22 @@ const isolatedEnvironmentKeys = [
   "EMAIL_TO"
 ];
 
-function withTestEnv(content, callback) {
+function withTestConfig(content, callback, fileName = "config.yaml") {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "backup-agent-config-"));
-  const envFile = path.join(directory, ".env");
-  fs.writeFileSync(envFile, content, "utf8");
+  const configFile = path.join(directory, fileName);
+  fs.writeFileSync(configFile, content, "utf8");
 
-  const originalEnvFile = process.env.ENV_FILE;
-  const originalAgentHome = process.env.AGENT_HOME;
   const originalEnvironment = new Map(
     isolatedEnvironmentKeys.map((key) => [key, process.env[key]])
   );
   for (const key of isolatedEnvironmentKeys) {
     delete process.env[key];
   }
-  process.env.ENV_FILE = envFile;
+  process.env.CONFIG_FILE = configFile;
   process.env.AGENT_HOME = directory;
   try {
     return callback(loadConfig());
   } finally {
-    if (originalEnvFile === undefined) delete process.env.ENV_FILE;
-    else process.env.ENV_FILE = originalEnvFile;
-    if (originalAgentHome === undefined) delete process.env.AGENT_HOME;
-    else process.env.AGENT_HOME = originalAgentHome;
     for (const [key, value] of originalEnvironment) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -76,42 +76,135 @@ function withTestEnv(content, callback) {
   }
 }
 
-const requiredConfig = [
-  "SOURCE_DIR=C:\\Backups",
-  "SOURCE_FILE_PATTERN=*.bak",
-  "DEST_HOST=192.0.2.10",
-  "DEST_PORT=22",
-  "DEST_USER=backup-user",
-  "DEST_REMOTE_DIR=/backups",
-  "DEST_AUTH_METHOD=password",
-  "DEST_PASSWORD=secret"
-].join("\n");
+function requiredYaml(sources = String.raw`
+sources:
+  items:
+    - name: database_backups
+      source_dir: 'C:\Backups'
+`) {
+  return String.raw`
+destination:
+  host: '192.0.2.10'
+  port: 22
+  user: backup-user
+  remote_dir: /backups
+  auth_method: password
+  password: secret
+${sources}
+`;
+}
 
 test("default update URL points to the latest GitHub release asset", () => {
-  withTestEnv(requiredConfig, (config) => {
+  withTestConfig(requiredYaml(), (config) => {
+    assert.equal(config.app.configKind, "yaml");
     assert.equal(config.update.url, DEFAULT_UPDATE_URL);
     assert.deepEqual(validateConfig(config), []);
   });
 });
 
-test("shared proxy URL is reused by update, destination, Telegram, and email", () => {
-  const content = [
-    requiredConfig,
-    "PROXY_URL=socks5://proxy.example:1080",
-    "UPDATE_USE_PROXY=on",
-    "DESTINATION_USE_PROXY=on",
-    "TELEGRAM_MODE=all",
-    "TELEGRAM_USE_PROXY=on",
-    "TELEGRAM_BOT_TOKEN=test-token",
-    "TELEGRAM_CHAT_ID=1234",
-    "EMAIL_MODE=all",
-    "EMAIL_USE_PROXY=on",
-    "SMTP_HOST=smtp.example.com",
-    "EMAIL_FROM=sender@example.com",
-    "EMAIL_TO=receiver@example.com"
-  ].join("\n");
+test("source defaults apply and item overrides win", () => {
+  const sources = String.raw`
+sources:
+  defaults:
+    mode: files
+    source_file_pattern: '*.bak'
+    latest_only: true
+    min_age_seconds: 30
+    delete_on_success: false
+    compression: false
+    retention_policy: time
+    retention_time: 1d
+    skip_already_transferred: true
+  items:
+    - name: database_backups
+      source_dir: 'C:\Backups'
+    - name: log_archives
+      source_dir: 'C:\Logs'
+      source_file_pattern: '*.zip'
+      latest_only: false
+      compression: true
+      retention_policy: count
+      retention_count: 3
+`;
 
-  withTestEnv(content, (config) => {
+  withTestConfig(requiredYaml(sources), (config) => {
+    assert.equal(config.sources.length, 2);
+    assert.equal(config.sources[0].name, "database_backups");
+    assert.equal(config.sources[0].pattern, "*.bak");
+    assert.equal(config.sources[0].latestOnly, true);
+    assert.equal(config.sources[0].minAgeSeconds, 30);
+    assert.equal(config.sources[0].retentionPolicy, "time");
+    assert.equal(config.sources[0].retentionTime, "1d");
+    assert.equal(config.sources[1].name, "log_archives");
+    assert.equal(config.sources[1].pattern, "*.zip");
+    assert.equal(config.sources[1].latestOnly, false);
+    assert.equal(config.sources[1].compression.enabled, true);
+    assert.equal(config.sources[1].retentionPolicy, "count");
+    assert.equal(config.sources[1].retentionCount, 3);
+    assert.deepEqual(validateConfig(config), []);
+  });
+});
+
+test("directory source mode is accepted and can use compression object syntax", () => {
+  const sources = String.raw`
+sources:
+  defaults:
+    min_age_seconds: 5
+    skip_already_transferred: true
+  items:
+    - name: app_data
+      mode: directory
+      source_dir: 'D:\AppData'
+      compression:
+        enabled: true
+        level: 7
+      retention_policy: off
+`;
+
+  withTestConfig(requiredYaml(sources), (config) => {
+    assert.equal(config.sources[0].mode, "directory");
+    assert.equal(config.sources[0].dir, "D:\\AppData");
+    assert.equal(config.sources[0].compression.enabled, true);
+    assert.equal(config.sources[0].compression.level, 7);
+    assert.equal(config.sources[0].retentionPolicy, "off");
+    assert.deepEqual(validateConfig(config), []);
+  });
+});
+
+test("shared proxy URL is reused by update, destination, Telegram, and email", () => {
+  const content = String.raw`
+proxy:
+  url: 'socks5://proxy.example:1080'
+update:
+  use_proxy: on
+destination:
+  host: '192.0.2.10'
+  port: 22
+  user: backup-user
+  remote_dir: /backups
+  auth_method: password
+  password: secret
+  use_proxy: on
+sources:
+  items:
+    - name: database_backups
+      source_dir: 'C:\Backups'
+notifications:
+  telegram:
+    mode: all
+    use_proxy: on
+    bot_token: test-token
+    chat_id: '1234'
+  email:
+    mode: all
+    use_proxy: on
+    smtp_host: smtp.example.com
+    from: sender@example.com
+    to:
+      - receiver@example.com
+`;
+
+  withTestConfig(content, (config) => {
     assert.equal(config.proxy.url, "socks5://proxy.example:1080");
     assert.equal(config.update.useProxy, true);
     assert.equal(config.update.proxy, "socks5://proxy.example:1080");
@@ -126,51 +219,108 @@ test("shared proxy URL is reused by update, destination, Telegram, and email", (
 });
 
 test("enabled destination proxy requires a shared proxy URL", () => {
-  const content = [
-    requiredConfig,
-    "DESTINATION_USE_PROXY=true"
-  ].join("\n");
+  const content = String.raw`
+destination:
+  host: '192.0.2.10'
+  port: 22
+  user: backup-user
+  remote_dir: /backups
+  auth_method: password
+  password: secret
+  use_proxy: true
+sources:
+  items:
+    - name: database_backups
+      source_dir: 'C:\Backups'
+`;
 
-  withTestEnv(content, (config) => {
+  withTestConfig(content, (config) => {
     const errors = validateConfig(config);
-    assert.ok(errors.includes("PROXY_URL is required when DESTINATION_USE_PROXY=true."));
+    assert.ok(errors.includes("PROXY_URL is required when destination.use_proxy=true."));
   });
 });
 
 test("Telegram-to-email fallback requires valid email settings", () => {
-  const content = [
-    requiredConfig,
-    "TELEGRAM_MODE=all",
-    "TELEGRAM_FALLBACK=email",
-    "TELEGRAM_BOT_TOKEN=test-token",
-    "TELEGRAM_CHAT_ID=1234",
-    "EMAIL_MODE=off"
-  ].join("\n");
+  const content = String.raw`
+destination:
+  host: '192.0.2.10'
+  port: 22
+  user: backup-user
+  remote_dir: /backups
+  auth_method: password
+  password: secret
+sources:
+  items:
+    - name: database_backups
+      source_dir: 'C:\Backups'
+notifications:
+  telegram:
+    mode: all
+    fallback: email
+    bot_token: test-token
+    chat_id: '1234'
+  email:
+    mode: off
+`;
 
-  withTestEnv(content, (config) => {
+  withTestConfig(content, (config) => {
     const errors = validateConfig(config);
-    assert.ok(errors.includes("SMTP_HOST is required."));
-    assert.ok(errors.includes("EMAIL_FROM is required."));
-    assert.ok(errors.includes("EMAIL_TO is required."));
+    assert.ok(errors.includes("notifications.email.smtp_host is required."));
+    assert.ok(errors.includes("notifications.email.from is required."));
+    assert.ok(errors.includes("notifications.email.to is required."));
   });
 });
 
 test("email-to-Telegram fallback requires valid Telegram settings", () => {
+  const content = String.raw`
+destination:
+  host: '192.0.2.10'
+  port: 22
+  user: backup-user
+  remote_dir: /backups
+  auth_method: password
+  password: secret
+sources:
+  items:
+    - name: database_backups
+      source_dir: 'C:\Backups'
+notifications:
+  email:
+    mode: all
+    fallback: telegram
+    smtp_host: smtp.example.com
+    smtp_port: 465
+    smtp_ssl: true
+    from: sender@example.com
+    to:
+      - receiver@example.com
+  telegram:
+    mode: off
+`;
+
+  withTestConfig(content, (config) => {
+    const errors = validateConfig(config);
+    assert.ok(errors.includes("notifications.telegram.bot_token is required."));
+    assert.ok(errors.includes("notifications.telegram.chat_id is required."));
+  });
+});
+
+test("legacy .env files are still accepted as a fallback format", () => {
   const content = [
-    requiredConfig,
-    "EMAIL_MODE=all",
-    "EMAIL_FALLBACK=telegram",
-    "SMTP_HOST=smtp.example.com",
-    "SMTP_PORT=465",
-    "SMTP_SSL=true",
-    "EMAIL_FROM=sender@example.com",
-    "EMAIL_TO=receiver@example.com",
-    "TELEGRAM_MODE=off"
+    "SOURCE_DIR=C:\\Backups",
+    "SOURCE_FILE_PATTERN=*.bak",
+    "DEST_HOST=192.0.2.10",
+    "DEST_PORT=22",
+    "DEST_USER=backup-user",
+    "DEST_REMOTE_DIR=/backups",
+    "DEST_AUTH_METHOD=password",
+    "DEST_PASSWORD=secret"
   ].join("\n");
 
-  withTestEnv(content, (config) => {
-    const errors = validateConfig(config);
-    assert.ok(errors.includes("TELEGRAM_BOT_TOKEN is required."));
-    assert.ok(errors.includes("TELEGRAM_CHAT_ID is required."));
-  });
+  withTestConfig(content, (config) => {
+    assert.equal(config.app.configKind, "env");
+    assert.equal(config.source.dir, "C:\\Backups");
+    assert.equal(config.source.pattern, "*.bak");
+    assert.deepEqual(validateConfig(config), []);
+  }, ".env");
 });

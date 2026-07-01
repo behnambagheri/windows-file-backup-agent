@@ -131,24 +131,29 @@ async function main() {
 
   const errors = validateConfig(config);
   if (errors.length > 0) {
-    logger.error("Invalid configuration", { envFile: config.app.envFile, errors });
+    logger.error("Invalid configuration", { configFile: config.app.configFile, errors });
     releaseLock();
     process.exit(1);
   }
 
   logger.info("Agent started", {
-    envFile: config.app.envFile,
+    configFile: config.app.configFile,
+    configKind: config.app.configKind,
     logFile: logger.file,
-    sourceDir: config.source.dir,
-    sourcePattern: config.source.pattern,
+    sourceCount: config.sources.length,
+    sources: config.sources.map((source) => ({
+      name: source.name,
+      mode: source.mode,
+      dir: source.dir,
+      pattern: source.mode === "files" ? source.pattern : undefined,
+      compression: source.compression.enabled,
+      retentionPolicy: source.retentionPolicy
+    })),
     sourceHost: config.app.hostname,
     destinationHost: config.destination.host,
     destinationDir: config.destination.remoteDir,
     createDestinationDir: config.destination.createDir,
     destinationDirFormat: config.destination.dirFormat,
-    retentionPolicy: config.source.retentionPolicy,
-    retentionTime: config.source.retentionPolicy === "time" ? config.source.retentionTime : "off",
-    retentionCount: config.source.retentionPolicy === "count" ? config.source.retentionCount : "off",
     metricsEnabled: config.metrics.enabled,
     metricsHost: config.metrics.host,
     metricsPort: config.metrics.port,

@@ -3,6 +3,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { spawnSync } = require("child_process");
+const yaml = require("js-yaml");
 const {
   loadConfig,
   validateConfig,
@@ -30,7 +31,7 @@ Usage:
   backup-agent start
   backup-agent stop
   backup-agent restart
-  backup-agent edit-env
+  backup-agent edit-config
   backup-agent metrics status
   backup-agent metrics enable [--port 9108] [--host 0.0.0.0] [--path /metrics] [--firewall]
   backup-agent metrics disable
@@ -46,7 +47,8 @@ Usage:
   backup-agent version
 
 Notes:
-  edit-env opens the active .env in elevated Notepad.
+  edit-config opens the active YAML config in elevated Notepad.
+  edit-env is kept as a compatibility alias for edit-config.
   Notification tests send a real test message even when the notification mode is off.
   The destination test writes, verifies, and removes a temporary file over SFTP.
   start, stop, restart, update, and uninstall should be run from an
@@ -121,7 +123,8 @@ function printStatus() {
   const config = loadConfig();
   console.log(`Name: backup-agent`);
   console.log(`Install dir: ${appDir()}`);
-  console.log(`Config: ${config.app.envFile}`);
+  console.log(`Config: ${config.app.configFile}`);
+  console.log(`Config type: ${config.app.configKind}`);
   console.log(`Logs: ${path.join(config.app.logsDir, "agent.log")}`);
 
   if (!isWindows()) {
@@ -165,29 +168,29 @@ function restartTask() {
   printPowerShellResult(restartTaskResult());
 }
 
-function editEnv() {
+function editConfig() {
   if (!isWindows()) {
-    console.error("edit-env is only available on Windows.");
+    console.error("edit-config is only available on Windows.");
     process.exit(1);
   }
 
   const config = loadConfig();
-  const envFile = config.app.envFile;
-  if (!fs.existsSync(envFile)) {
-    fs.mkdirSync(path.dirname(envFile), { recursive: true });
-    const exampleFile = path.join(appDir(), ".env.example");
+  const configFile = config.app.configFile;
+  if (!fs.existsSync(configFile)) {
+    fs.mkdirSync(path.dirname(configFile), { recursive: true });
+    const exampleFile = path.join(appDir(), "config.yaml.example");
     if (fs.existsSync(exampleFile)) {
-      fs.copyFileSync(exampleFile, envFile);
+      fs.copyFileSync(exampleFile, configFile);
     } else {
-      fs.writeFileSync(envFile, "", "utf8");
+      fs.writeFileSync(configFile, "", "utf8");
     }
   }
 
   const command = `
-$envFile = ${quotePowerShell(envFile)}
-$notepadArgument = '"' + $envFile + '"'
+$configFile = ${quotePowerShell(configFile)}
+$notepadArgument = '"' + $configFile + '"'
 Start-Process -FilePath "notepad.exe" -Verb RunAs -ArgumentList @($notepadArgument)
-Write-Host "Opened backup-agent config in Notepad: $envFile"
+Write-Host "Opened backup-agent config in Notepad: $configFile"
 `;
   printPowerShellResult(runPowerShell(command));
 }
@@ -231,8 +234,21 @@ function health() {
   const errors = validateConfig(config);
   const warnings = [];
 
-  if (config.source.dir && !fs.existsSync(config.source.dir)) {
-    errors.push(`SOURCE_DIR does not exist: ${config.source.dir}`);
+  for (const source of config.sources) {
+    if (!source.dir) {
+      continue;
+    }
+    try {
+      const stats = fs.statSync(source.dir);
+      if (!stats.isDirectory()) {
+        errors.push(`Source ${source.name} is not a directory: ${source.dir}`);
+      }
+    } catch {
+      errors.push(`Source ${source.name} does not exist: ${source.dir}`);
+    }
+    if (source.mode === "directory" && source.retentionPolicy !== "off") {
+      warnings.push(`Source ${source.name} uses directory mode; retention cleanup is skipped for directory sources.`);
+    }
   }
 
   try {
@@ -253,17 +269,30 @@ function health() {
     warnings.push("Scheduled Task check skipped because this is not Windows.");
   }
 
-  console.log(`Config: ${config.app.envFile}`);
+  console.log(`Config: ${config.app.configFile}`);
+  console.log(`Config type: ${config.app.configKind}`);
   console.log(`Logs: ${path.join(config.app.logsDir, "agent.log")}`);
   console.log(`Hostname: ${config.app.hostname}`);
-  console.log(`Compression: ${config.compression.enabled ? "enabled" : "disabled"}`);
   console.log(`Create destination directory: ${config.destination.createDir ? config.destination.dirFormat : "disabled"}`);
-  console.log(`Retention: ${config.source.retentionPolicy}`);
-  if (config.source.retentionPolicy === "time") {
-    console.log(`Retention time: ${config.source.retentionTime}`);
-  }
-  if (config.source.retentionPolicy === "count") {
-    console.log(`Retention count: ${config.source.retentionCount}`);
+  console.log(`Sources: ${config.sources.length}`);
+  for (const source of config.sources) {
+    const retentionDetail = source.retentionPolicy === "time"
+      ? `time:${source.retentionTime}`
+      : source.retentionPolicy === "count"
+        ? `count:${source.retentionCount}`
+        : "off";
+    console.log(`Source: ${source.name}`);
+    console.log(`  Mode: ${source.mode}`);
+    console.log(`  Directory: ${source.dir}`);
+    if (source.mode === "files") {
+      console.log(`  Pattern: ${source.pattern}`);
+      console.log(`  Latest only: ${source.latestOnly ? "true" : "false"}`);
+    }
+    console.log(`  Min age seconds: ${source.minAgeSeconds}`);
+    console.log(`  Compression: ${source.compression.enabled ? "enabled" : "disabled"}`);
+    console.log(`  Retention: ${retentionDetail}`);
+    console.log(`  Delete on success: ${source.deleteOnSuccess ? "true" : "false"}`);
+    console.log(`  Skip already transferred: ${source.skipAlreadyTransferred ? "true" : "false"}`);
   }
   console.log(`Metrics: ${config.metrics.enabled ? `${config.metrics.host}:${config.metrics.port}${config.metrics.path}` : "disabled"}`);
   console.log(`Metrics firewall rule: ${config.metrics.firewallRule ? "enabled" : "disabled"}`);
@@ -299,6 +328,10 @@ function parseOption(args, names, fallback = "") {
   return fallback;
 }
 
+function isYamlConfigFile(configFile) {
+  return /\.ya?ml($|\.)/i.test(path.basename(configFile));
+}
+
 function setEnvValues(envFile, updates) {
   let content = "";
   if (fs.existsSync(envFile)) {
@@ -330,6 +363,54 @@ function setEnvValues(envFile, updates) {
   fs.writeFileSync(envFile, `${next.join("\n").replace(/\n+$/, "")}\n`, "utf8");
 }
 
+function setNestedValue(target, dottedPath, value) {
+  const parts = dottedPath.split(".");
+  let current = target;
+  while (parts.length > 1) {
+    const part = parts.shift();
+    if (!current[part] || typeof current[part] !== "object" || Array.isArray(current[part])) {
+      current[part] = {};
+    }
+    current = current[part];
+  }
+  current[parts[0]] = value;
+}
+
+function ensureConfigFile(configFile) {
+  if (fs.existsSync(configFile)) {
+    return;
+  }
+  fs.mkdirSync(path.dirname(configFile), { recursive: true });
+  const exampleFile = path.join(appDir(), "config.yaml.example");
+  if (fs.existsSync(exampleFile) && isYamlConfigFile(configFile)) {
+    fs.copyFileSync(exampleFile, configFile);
+    return;
+  }
+  fs.writeFileSync(configFile, isYamlConfigFile(configFile) ? "{}\n" : "", "utf8");
+}
+
+function setYamlValues(configFile, updates) {
+  ensureConfigFile(configFile);
+  const content = fs.readFileSync(configFile, "utf8");
+  const document = yaml.load(content) || {};
+  for (const [key, value] of Object.entries(updates)) {
+    setNestedValue(document, key, value);
+  }
+  fs.writeFileSync(configFile, yaml.dump(document, {
+    lineWidth: -1,
+    noRefs: true,
+    sortKeys: false
+  }), "utf8");
+}
+
+function setConfigValues(configFile, updates) {
+  if (isYamlConfigFile(configFile)) {
+    setYamlValues(configFile, updates);
+    return;
+  }
+  setEnvValues(configFile, updates);
+}
+
 function restartAfterConfigChange() {
   if (!isWindows()) {
     console.log("Config updated. Run backup-agent restart on Windows if the running service needs to reload it.");
@@ -352,7 +433,7 @@ function metricsCommand(args) {
   if (subcommand === "status") {
     console.log(`Metrics: ${config.metrics.enabled ? "enabled" : "disabled"}`);
     console.log(`Listen: ${config.metrics.host}:${config.metrics.port}${config.metrics.path}`);
-    console.log(`Firewall rule requested in .env: ${config.metrics.firewallRule ? "true" : "false"}`);
+    console.log(`Firewall rule requested in config: ${config.metrics.firewallRule ? "true" : "false"}`);
     return;
   }
 
@@ -369,17 +450,29 @@ function metricsCommand(args) {
       console.error("Metrics path must start with /.");
       process.exit(2);
     }
-    const updates = {
-      METRICS_ENABLED: "true",
-      METRICS_HOST: host,
-      METRICS_PORT: String(parsedPort),
-      METRICS_PATH: metricsPath
-    };
+    const yamlConfig = isYamlConfigFile(config.app.configFile);
+    const updates = yamlConfig
+      ? {
+        "metrics.enabled": true,
+        "metrics.host": host,
+        "metrics.port": parsedPort,
+        "metrics.path": metricsPath
+      }
+      : {
+        METRICS_ENABLED: "true",
+        METRICS_HOST: host,
+        METRICS_PORT: String(parsedPort),
+        METRICS_PATH: metricsPath
+      };
     if (args.includes("--firewall")) {
-      updates.METRICS_FIREWALL_RULE = "true";
+      if (yamlConfig) {
+        updates["metrics.firewall_rule"] = true;
+      } else {
+        updates.METRICS_FIREWALL_RULE = "true";
+      }
     }
-    setEnvValues(config.app.envFile, updates);
-    console.log(`Metrics enabled in ${config.app.envFile}: ${host}:${port}${metricsPath}`);
+    setConfigValues(config.app.configFile, updates);
+    console.log(`Metrics enabled in ${config.app.configFile}: ${host}:${port}${metricsPath}`);
     if (args.includes("--firewall")) {
       if (isWindows()) {
         const result = firewallResult("add", parsedPort, config);
@@ -394,8 +487,11 @@ function metricsCommand(args) {
   }
 
   if (subcommand === "disable") {
-    setEnvValues(config.app.envFile, { METRICS_ENABLED: "false" });
-    console.log(`Metrics disabled in ${config.app.envFile}`);
+    const updates = isYamlConfigFile(config.app.configFile)
+      ? { "metrics.enabled": false }
+      : { METRICS_ENABLED: "false" };
+    setConfigValues(config.app.configFile, updates);
+    console.log(`Metrics disabled in ${config.app.configFile}`);
     restartAfterConfigChange();
     return;
   }
@@ -496,11 +592,11 @@ function updateAgent() {
   const installDir = appDir();
   const updateUrl = config.update.url;
   if (!updateUrl) {
-    console.error("UPDATE_URL is empty.");
+    console.error("update.url is empty.");
     process.exit(1);
   }
   if (config.update.useProxy && !config.update.proxy) {
-    console.error("PROXY_URL is required when UPDATE_USE_PROXY=true.");
+    console.error("proxy.url is required when update.use_proxy=true.");
     process.exit(1);
   }
 
@@ -695,9 +791,11 @@ async function main() {
     case "restart":
       restartTask();
       break;
+    case "edit-config":
+    case "editconfig":
     case "edit-env":
     case "editenv":
-      editEnv();
+      editConfig();
       break;
     case "metrics":
       metricsCommand(args);

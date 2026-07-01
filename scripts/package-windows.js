@@ -92,7 +92,7 @@ copyRecursive(path.join(root, "node_modules"), path.join(packageDir, "app", "nod
 for (const file of ["package.json", "package-lock.json"]) {
   fs.copyFileSync(path.join(root, file), path.join(packageDir, "app", file));
 }
-for (const file of [".env.example", "README.md", "LICENSE", "install.ps1", "uninstall.ps1", "backup-agent.cmd"]) {
+for (const file of ["config.yaml.example", "README.md", "LICENSE", "install.ps1", "uninstall.ps1", "backup-agent.cmd"]) {
   fs.copyFileSync(path.join(root, file), path.join(packageDir, file));
 }
 

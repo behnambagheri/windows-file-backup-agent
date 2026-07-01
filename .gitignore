@@ -2,6 +2,7 @@
 .idea/
 .runtime/
 .env
+config.yaml
 node_modules/
 logs/
 state/

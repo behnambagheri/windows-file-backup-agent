@@ -17,11 +17,14 @@ $SourceDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $NodeSource = Join-Path $SourceDir "node\node.exe"
 $AppSource = Join-Path $SourceDir "app"
 $AgentCmdSource = Join-Path $SourceDir "backup-agent.cmd"
-$EnvExampleSource = Join-Path $SourceDir ".env.example"
-$EnvSource = Join-Path $SourceDir ".env"
+$ConfigExampleSource = Join-Path $SourceDir "config.yaml.example"
+$ConfigSource = Join-Path $SourceDir "config.yaml"
 
 if (!(Test-Path $NodeSource) -or !(Test-Path $AppSource)) {
     throw "Missing runtime. Expected node\node.exe plus app\."
+}
+if (!(Test-Path $ConfigExampleSource)) {
+    throw "Missing config.yaml.example."
 }
 
 function Add-PathEntry {
@@ -47,50 +50,41 @@ function Add-PathEntry {
     }
 }
 
-function Get-DotEnvValue {
-    param(
-        [string]$Path,
-        [string]$Name,
-        [string]$Default = ""
-    )
+function Get-AgentMetricsConfig {
+    param([string]$InstallDir)
 
-    if (!(Test-Path $Path)) {
-        return $Default
+    $NodeExe = Join-Path $InstallDir "node\node.exe"
+    $ConfigModule = Join-Path $InstallDir "app\src\config.js"
+    if (!(Test-Path $NodeExe) -or !(Test-Path $ConfigModule)) {
+        return $null
     }
 
-    $Match = Get-Content $Path | Where-Object { $_ -match "^\s*$([regex]::Escape($Name))\s*=" } | Select-Object -Last 1
-    if (!$Match) {
-        return $Default
+    $OldAgentHome = $env:AGENT_HOME
+    try {
+        $env:AGENT_HOME = $InstallDir
+        $Json = & $NodeExe -e "const { loadConfig } = require(process.argv[1]); const config = loadConfig(); console.log(JSON.stringify(config.metrics));" $ConfigModule
+        if ($LASTEXITCODE -ne 0 -or !$Json) {
+            return $null
+        }
+        return $Json | ConvertFrom-Json
+    } finally {
+        if ($null -eq $OldAgentHome) {
+            Remove-Item Env:\AGENT_HOME -ErrorAction SilentlyContinue
+        } else {
+            $env:AGENT_HOME = $OldAgentHome
+        }
     }
-
-    return (($Match -split "=", 2)[1]).Trim().Trim("'").Trim('"')
-}
-
-function Test-DotEnvBool {
-    param(
-        [string]$Path,
-        [string]$Name,
-        [bool]$Default = $false
-    )
-
-    $Value = (Get-DotEnvValue -Path $Path -Name $Name -Default "").ToLower()
-    if ($Value -eq "") {
-        return $Default
-    }
-    return @("1", "true", "yes", "y", "on") -contains $Value
 }
 
 function Ensure-MetricsFirewallRule {
-    param([string]$EnvPath)
+    param([object]$Metrics)
 
-    $MetricsEnabled = Test-DotEnvBool -Path $EnvPath -Name "METRICS_ENABLED"
-    $FirewallEnabled = Test-DotEnvBool -Path $EnvPath -Name "METRICS_FIREWALL_RULE"
-    if (!$MetricsEnabled -or !$FirewallEnabled) {
+    if (!$Metrics -or !$Metrics.enabled -or !$Metrics.firewallRule) {
         return
     }
 
-    $Port = [int](Get-DotEnvValue -Path $EnvPath -Name "METRICS_PORT" -Default "9108")
-    $RuleName = Get-DotEnvValue -Path $EnvPath -Name "METRICS_FIREWALL_RULE_NAME" -Default "backup-agent metrics"
+    $Port = [int]$Metrics.port
+    $RuleName = [string]$Metrics.firewallRuleName
 
     $Existing = Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue
     if ($Existing) {
@@ -114,16 +108,21 @@ Copy-Item -Recurse -Force $AppSource (Join-Path $InstallDir "app")
 Copy-Item -Force $AgentCmdSource (Join-Path $InstallDir "backup-agent.cmd")
 Copy-Item -Force (Join-Path $SourceDir "README.md") (Join-Path $InstallDir "README.md")
 Copy-Item -Force (Join-Path $SourceDir "uninstall.ps1") (Join-Path $InstallDir "uninstall.ps1")
-Copy-Item -Force $EnvExampleSource (Join-Path $InstallDir ".env.example")
+Copy-Item -Force $ConfigExampleSource (Join-Path $InstallDir "config.yaml.example")
 
-$InstalledEnv = Join-Path $InstallDir ".env"
-if (Test-Path $EnvSource) {
-    Copy-Item -Force $EnvSource $InstalledEnv
-} elseif (!(Test-Path $InstalledEnv)) {
-    Copy-Item -Force $EnvExampleSource $InstalledEnv
+$InstalledConfig = Join-Path $InstallDir "config.yaml"
+$InstalledLegacyEnv = Join-Path $InstallDir ".env"
+if (Test-Path $ConfigSource) {
+    Copy-Item -Force $ConfigSource $InstalledConfig
+} elseif (!(Test-Path $InstalledConfig) -and !(Test-Path $InstalledLegacyEnv)) {
+    Copy-Item -Force $ConfigExampleSource $InstalledConfig
+} elseif (!(Test-Path $InstalledConfig) -and (Test-Path $InstalledLegacyEnv)) {
+    Write-Host "Keeping existing legacy .env config. Create config.yaml to use the YAML format."
 }
 
-Ensure-MetricsFirewallRule -EnvPath $InstalledEnv
+$ActiveConfig = if (Test-Path $InstalledConfig) { $InstalledConfig } elseif (Test-Path $InstalledLegacyEnv) { $InstalledLegacyEnv } else { $InstalledConfig }
+$MetricsConfig = Get-AgentMetricsConfig -InstallDir $InstallDir
+Ensure-MetricsFirewallRule -Metrics $MetricsConfig
 
 $Action = New-ScheduledTaskAction `
     -Execute (Join-Path $InstallDir "node\node.exe") `
@@ -161,7 +160,7 @@ Add-PathEntry -Directory $InstallDir -Scope $PathScope
 
 Write-Host "Installed backup-agent."
 Write-Host "Install directory: $InstallDir"
-Write-Host "Config file: $InstalledEnv"
+Write-Host "Config file: $ActiveConfig"
 Write-Host "Log file: $(Join-Path $InstallDir 'logs\agent.log')"
 Write-Host "Task name: $TaskName"
 Write-Host "Run mode: $RunAs"

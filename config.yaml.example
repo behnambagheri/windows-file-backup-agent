@@ -1,0 +1,235 @@
+# backup-agent configuration template.
+# Copy this file to config.yaml, replace the example values, and keep config.yaml private.
+# Prefer true/false for booleans. Quoted "on"/"off", "yes"/"no", and 1/0 are also accepted.
+
+app:
+  # Keep this as backup-agent for consistent service, task, CLI, and log naming.
+  name: backup-agent
+
+  # Source machine name used in notifications and dynamic destination folders.
+  # Leave empty to use the Windows hostname automatically.
+  # Example: sql-prod-01
+  hostname: ''
+
+logging:
+  # Allowed values: debug, info, warn, error.
+  level: info
+
+  # Leave empty to use <install-directory>\logs.
+  # Example: 'D:\backup-agent\logs'
+  dir: ''
+
+state:
+  # Stores the lock file, transfer history, and temporary compressed files.
+  # Leave empty to use <install-directory>\state.
+  # Example: 'D:\backup-agent\state'
+  dir: ''
+
+schedule:
+  # Six-field cron expression: second minute hour day-of-month month day-of-week.
+  # Examples: every 5 minutes = '0 */5 * * * *'; daily at 02:30 = '0 30 2 * * *'.
+  cron: '0 */5 * * * *'
+
+  # Run one transfer cycle immediately when the service starts.
+  run_on_start: true
+
+  # Exit after one cycle. Keep false for the installed service; the CLI sets this for run-once.
+  run_once: false
+
+proxy:
+  # Shared SOCKS proxy URL. It is used only by sections where use_proxy is true.
+  # Formats: socks5://host:port or socks5://username:password@host:port.
+  url: 'socks5://127.0.0.1:1080'
+
+update:
+  # Zip package downloaded by `backup-agent update`.
+  # The default always resolves to the newest GitHub release asset.
+  url: 'https://github.com/behnambagheri/windows-file-backup-agent/releases/latest/download/backup-agent-windows.zip'
+
+  # Route update package downloads through proxy.url.
+  use_proxy: false
+
+metrics:
+  # Enable the Prometheus HTTP endpoint.
+  enabled: false
+
+  # Use 0.0.0.0 for remote scraping or 127.0.0.1 for local access only.
+  host: '0.0.0.0'
+
+  # TCP port for Prometheus scraping. Allowed range: 1-65535.
+  port: 9108
+
+  # Prometheus endpoint path. It must start with /. The health endpoint is always /healthz.
+  path: /metrics
+
+  # Ask the installer to add/update a Windows Firewall inbound rule for this port.
+  # This only applies when metrics.enabled is true.
+  firewall_rule: false
+
+  # Display name used for the Windows Firewall rule.
+  firewall_rule_name: backup-agent metrics
+
+destination:
+  # Destination SSH server hostname or IP address.
+  host: '192.0.2.10'
+
+  # Destination SSH port. Allowed range: 1-65535.
+  port: 22
+
+  # SSH account used to connect to the destination.
+  user: backup-user
+
+  # Base destination directory on the remote server. Use a POSIX path.
+  remote_dir: /backups
+
+  # Create an additional destination directory for each upload.
+  create_dir: false
+
+  # Used only when create_dir is true.
+  # Allowed values:
+  # - date: /backups/2026-07-01_13-45-00
+  # - hostname: /backups/sql-prod-01
+  # - hostname+date: /backups/sql-prod-01/2026-07-01_13-45-00
+  dir_format: date
+
+  # Allowed values: password, private_key.
+  auth_method: password
+
+  # SSH password when auth_method is password.
+  # When auth_method is private_key, leave empty unless the key has a passphrase.
+  password: change-me
+
+  # Full private key file encoded as one base64 string when auth_method is private_key.
+  # PowerShell: [Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\path\id_rsa"))
+  private_key_base64: ''
+
+  # Maximum time in milliseconds to establish the SSH connection.
+  ready_timeout_ms: 30000
+
+  # SSH keepalive interval in milliseconds. 20000 means 20 seconds.
+  keepalive_interval_ms: 20000
+
+  # Route destination SSH/SFTP transfers through proxy.url.
+  use_proxy: false
+
+sources:
+  defaults:
+    # Default source mode. Allowed values:
+    # - files: select matching files directly inside source_dir.
+    # - directory: treat source_dir itself as one transfer item.
+    mode: files
+
+    # Used only when mode is files. Wildcards * and ? are supported.
+    # Examples: '*.bak', '*.zip', 'database-????.bak'.
+    source_file_pattern: '*.bak'
+
+    # Used only when mode is files. true means transfer only the newest matching file by modified time.
+    latest_only: true
+
+    # Skip files or directory snapshots newer than this many seconds.
+    # This helps avoid uploading a file while another process is still writing it.
+    min_age_seconds: 10
+
+    # Delete the source file after successful upload.
+    # In directory mode, this deletes the whole local source_dir after a full successful upload.
+    delete_on_success: false
+
+    # Maximum compression before upload.
+    # File mode true uploads each file as .gz.
+    # Directory mode true uploads the source directory as .tar.gz; false uploads it recursively over SFTP.
+    compression: false
+
+    # Source cleanup strategy. Allowed values: off, time, count.
+    # Retention applies only to mode=files sources and only to files matching source_file_pattern.
+    retention_policy: off
+
+    # Used when retention_policy is time.
+    # Units: s=seconds, m=minutes, h=hours, d=days, w=weeks.
+    # Examples: 60m, 1d, 7d, 3w.
+    retention_time: 1d
+
+    # Used when retention_policy is count. Keeps the newest N matching files.
+    retention_count: 2
+
+    # Skip an unchanged item after it was transferred successfully.
+    # Keep true when delete_on_success is false to prevent repeated uploads.
+    skip_already_transferred: true
+
+  items:
+    # Example 1: transfer the newest .bak file from a backup directory.
+    - name: database_backups
+      mode: files
+      source_dir: 'C:\Backups\Database'
+      source_file_pattern: '*.bak'
+
+    # Example 2: send a whole directory as one compressed .tar.gz archive.
+    # Set compression: false to upload the directory recursively without archiving it first.
+    - name: application_data
+      mode: directory
+      source_dir: 'D:\AppData\ImportantFolder'
+      compression: true
+      retention_policy: off
+
+notifications:
+  telegram:
+    # Allowed values: off, all, success, failures.
+    mode: off
+
+    # Channel used when a required Telegram delivery fails. Allowed values: off, email.
+    # Email settings must be valid when this is set to email.
+    fallback: off
+
+    # Telegram Bot API base URL. Keep the default unless using a compatible API gateway.
+    api_url: 'https://api.telegram.org'
+
+    # Route Telegram API requests through proxy.url.
+    use_proxy: false
+
+    # Telegram bot token from BotFather.
+    bot_token: ''
+
+    # Destination chat ID. User IDs are positive; group/channel IDs are commonly negative.
+    chat_id: ''
+
+    # Optional forum topic/message-thread ID. Leave empty for a normal chat.
+    topic_id: ''
+
+  email:
+    # Allowed values: off, all, success, failures.
+    mode: off
+
+    # Channel used when a required email delivery fails. Allowed values: off, telegram.
+    # Telegram settings must be valid when this is set to telegram.
+    fallback: off
+
+    # Route SMTP delivery through proxy.url.
+    use_proxy: false
+
+    # SMTP server hostname or IP address.
+    smtp_host: smtp.example.com
+
+    # Common ports: 465 for implicit TLS, 587 for STARTTLS, 25 for plain/STARTTLS.
+    smtp_port: 465
+
+    # Use implicit TLS from connection start. Use true for 465 and usually false for 587/25.
+    smtp_ssl: true
+
+    # SMTP login username. Leave empty only when the server allows unauthenticated sending.
+    smtp_user: ''
+
+    # SMTP login password or application-specific password.
+    smtp_password: ''
+
+    # Sender address shown in the email From header.
+    from: backup-agent@example.com
+
+    # Required recipient list. Use a YAML list for one or more recipients.
+    to:
+      - admin@example.com
+
+    # Optional CC and BCC recipient lists.
+    cc: []
+    bcc: []
+
+    # Text prepended to notification email subjects.
+    subject_prefix: '[backup-agent]'

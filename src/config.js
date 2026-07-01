@@ -2,8 +2,9 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const dotenv = require("dotenv");
+const yaml = require("js-yaml");
 
-let fileEnv = {};
+const DEFAULT_UPDATE_URL = "https://github.com/behnambagheri/windows-file-backup-agent/releases/latest/download/backup-agent-windows.zip";
 
 function appDir() {
   if (process.env.AGENT_HOME) {
@@ -12,86 +13,135 @@ function appDir() {
   if (process.pkg && process.execPath) {
     return path.dirname(process.execPath);
   }
-  if (fs.existsSync(path.join(process.cwd(), ".env"))) {
+  if (
+    fs.existsSync(path.join(process.cwd(), "config.yaml")) ||
+    fs.existsSync(path.join(process.cwd(), "config.yml")) ||
+    fs.existsSync(path.join(process.cwd(), ".env"))
+  ) {
     return process.cwd();
   }
   return path.resolve(__dirname, "..");
 }
 
-function readEnvFile() {
-  const configured = process.env.ENV_FILE;
+function readConfigFile() {
+  const directory = appDir();
+  const configured = process.env.CONFIG_FILE || process.env.BACKUP_AGENT_CONFIG || process.env.ENV_FILE;
   const candidates = [
     configured,
+    path.join(process.cwd(), "config.yaml"),
+    path.join(process.cwd(), "config.yml"),
+    path.join(directory, "config.yaml"),
+    path.join(directory, "config.yml"),
     path.join(process.cwd(), ".env"),
-    path.join(appDir(), ".env")
+    path.join(directory, ".env")
   ].filter(Boolean);
 
-  const envFile = candidates.find((candidate) => fs.existsSync(candidate));
-  if (!envFile) {
-    fileEnv = {};
-    return { envFile: path.join(appDir(), ".env"), parsed: {} };
+  const configFile = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!configFile) {
+    return {
+      configFile: path.join(directory, "config.yaml"),
+      kind: "yaml",
+      data: {}
+    };
   }
 
-  fileEnv = dotenv.parse(fs.readFileSync(envFile, "utf8"));
-  return { envFile, parsed: fileEnv };
+  const content = fs.readFileSync(configFile, "utf8");
+  if (isYamlConfigFile(configFile)) {
+    return {
+      configFile,
+      kind: "yaml",
+      data: yaml.load(content) || {}
+    };
+  }
+
+  return {
+    configFile,
+    kind: "env",
+    data: dotenv.parse(content)
+  };
 }
 
-function firstEnv(names, fallback = "") {
-  for (const name of names) {
-    const value = fileEnv[name];
-    if (value !== undefined && String(value).trim() !== "") {
-      return String(value).trim();
+function isYamlConfigFile(configFile) {
+  return /\.ya?ml($|\.)/i.test(path.basename(configFile));
+}
+
+function isSet(value) {
+  return value !== undefined && value !== null && String(value).trim() !== "";
+}
+
+function setting(primary, fallback, aliases, defaultValue = "") {
+  for (const alias of aliases) {
+    if (primary && isSet(primary[alias])) {
+      return primary[alias];
     }
   }
-  for (const name of names) {
-    const value = process.env[name];
-    if (value !== undefined && String(value).trim() !== "") {
-      return String(value).trim();
+  for (const alias of aliases) {
+    if (fallback && isSet(fallback[alias])) {
+      return fallback[alias];
     }
   }
-  return fallback;
+  return defaultValue;
 }
 
-function envBool(names, fallback = false) {
-  const value = firstEnv(names, "");
-  if (value === "") {
-    return fallback;
+function envSetting(names, defaultValue = "") {
+  for (const name of names) {
+    if (isSet(process.env[name])) {
+      return process.env[name];
+    }
   }
-  return ["1", "true", "yes", "y", "on"].includes(value.toLowerCase());
+  return defaultValue;
 }
 
-function envInt(names, fallback) {
-  const raw = firstEnv(names, "");
-  if (raw === "") {
+function stringValue(value, fallback = "") {
+  if (!isSet(value)) {
     return fallback;
   }
-  const parsed = Number.parseInt(raw, 10);
+  return String(value).trim();
+}
+
+function boolValue(value, fallback = false) {
+  if (!isSet(value)) {
+    return fallback;
+  }
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+  return ["1", "true", "yes", "y", "on"].includes(String(value).trim().toLowerCase());
+}
+
+function intValue(value, fallback) {
+  if (!isSet(value)) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(String(value).trim(), 10);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function proxyUrl(names = []) {
-  return firstEnv(["PROXY_URL", "GLOBAL_PROXY_URL", ...names, "SOCKS5_PROXY"]);
-}
-
-function mode(names, fallback = "off") {
-  const value = firstEnv(names, fallback).toLowerCase();
-  if (["all", "success", "failures", "failure", "failed", "errors", "error", "off", "none", "false", "disabled"].includes(value)) {
-    if (["failure", "failed", "errors", "error"].includes(value)) {
+function modeValue(value, fallback = "off") {
+  const normalized = stringValue(value, fallback).toLowerCase();
+  if (["all", "success", "failures", "failure", "failed", "errors", "error", "off", "none", "false", "disabled"].includes(normalized)) {
+    if (["failure", "failed", "errors", "error"].includes(normalized)) {
       return "failures";
     }
-    if (["none", "false", "disabled"].includes(value)) {
+    if (["none", "false", "disabled"].includes(normalized)) {
       return "off";
     }
-    return value;
+    return normalized;
   }
   return fallback;
 }
 
 function parseEmailList(value) {
-  if (!value) {
+  if (!isSet(value)) {
     return [];
   }
-  return value.split(/[;,]/).map((item) => item.trim()).filter(Boolean);
+  if (Array.isArray(value)) {
+    return value.map((item) => stringValue(item)).filter(Boolean);
+  }
+  return String(value).split(/[;,]/).map((item) => item.trim()).filter(Boolean);
 }
 
 function disabledValue(value) {
@@ -113,7 +163,6 @@ function parseDurationMs(raw) {
   }
 
   const amount = Number.parseInt(match[1], 10);
-  const unit = match[2];
   const multipliers = {
     s: 1000,
     m: 60 * 1000,
@@ -121,23 +170,39 @@ function parseDurationMs(raw) {
     d: 24 * 60 * 60 * 1000,
     w: 7 * 24 * 60 * 60 * 1000
   };
-  return amount > 0 ? amount * multipliers[unit] : Number.NaN;
+  return amount > 0 ? amount * multipliers[match[2]] : Number.NaN;
 }
 
 function parsePositiveInt(raw) {
-  const value = String(raw || "").trim();
-  if (value === "") {
+  if (!isSet(raw)) {
     return null;
   }
+  const value = String(raw).trim();
   const parsed = Number.parseInt(value, 10);
   return Number.isInteger(parsed) && parsed > 0 && String(parsed) === value ? parsed : Number.NaN;
 }
 
-function retentionConfig() {
-  const legacyMinutes = firstEnv(["RETENTION_MINUTES", "retention-minutes", "SOURCE_RETENTION_MINUTES", "source-retention-minutes"], "");
-  const retentionTime = firstEnv(["RETENTION_TIME", "retention-time", "SOURCE_RETENTION_TIME", "source-retention-time"], legacyMinutes || "off");
-  const retentionCountRaw = firstEnv(["RETENTION_COUNT", "retention-count", "SOURCE_RETENTION_COUNT", "source-retention-count"], "");
-  const explicitPolicy = firstEnv(["RETENTION_POLICY", "retention-policy", "SOURCE_RETENTION_POLICY", "source-retention-policy"], "").toLowerCase();
+function retentionConfig(primary, fallback) {
+  const legacyMinutes = setting(primary, fallback, [
+    "retention_minutes",
+    "RETENTION_MINUTES",
+    "SOURCE_RETENTION_MINUTES"
+  ], "");
+  const retentionTime = setting(primary, fallback, [
+    "retention_time",
+    "RETENTION_TIME",
+    "SOURCE_RETENTION_TIME"
+  ], legacyMinutes || "off");
+  const retentionCountRaw = setting(primary, fallback, [
+    "retention_count",
+    "RETENTION_COUNT",
+    "SOURCE_RETENTION_COUNT"
+  ], "");
+  const explicitPolicy = stringValue(setting(primary, fallback, [
+    "retention_policy",
+    "RETENTION_POLICY",
+    "SOURCE_RETENTION_POLICY"
+  ], "")).toLowerCase();
 
   let policy = explicitPolicy;
   if (policy === "") {
@@ -157,78 +222,186 @@ function retentionConfig() {
   const count = policy === "count" ? parsePositiveInt(retentionCountRaw) : null;
   return {
     policy,
-    time: retentionTime,
+    time: stringValue(retentionTime, "off"),
     timeMs,
     minutes: Number.isFinite(timeMs) ? Math.ceil(timeMs / 60000) : null,
     count
   };
 }
 
-function loadConfig() {
-  const { envFile } = readEnvFile();
-  const directory = appDir();
-  const logsDir = path.resolve(firstEnv(["LOG_DIR"], path.join(directory, "logs")));
-  const stateDir = path.resolve(firstEnv(["STATE_DIR"], path.join(directory, "state")));
-  const retention = retentionConfig();
+function objectSetting(primary, fallback, aliases) {
+  for (const alias of aliases) {
+    if (primary && primary[alias] && typeof primary[alias] === "object" && !Array.isArray(primary[alias])) {
+      return primary[alias];
+    }
+  }
+  for (const alias of aliases) {
+    if (fallback && fallback[alias] && typeof fallback[alias] === "object" && !Array.isArray(fallback[alias])) {
+      return fallback[alias];
+    }
+  }
+  return null;
+}
 
-  const telegramExplicitEnabled = firstEnv(["TELEGRAM_ENABLED"], "");
-  const emailExplicitEnabled = firstEnv(["EMAIL_ENABLED"], "");
+function compressionConfig(primary, fallback, stateDir, safeName) {
+  const compressionObject = objectSetting(primary, fallback, ["compression", "COMPRESSION"]);
+  const rawEnabled = compressionObject
+    ? setting(compressionObject, {}, ["enabled"], false)
+    : setting(primary, fallback, ["compression", "compression_enabled", "COMPRESSION", "COMPRESSION_ENABLED"], false);
+  const rawLevel = compressionObject
+    ? setting(compressionObject, {}, ["level"], 9)
+    : setting(primary, fallback, ["compression_level", "COMPRESSION_LEVEL"], 9);
+  const rawTempDir = compressionObject
+    ? setting(compressionObject, {}, ["temp_dir", "tempDir"], "")
+    : setting(primary, fallback, ["compression_temp_dir", "COMPRESSION_TEMP_DIR"], "");
+  const level = intValue(rawLevel, 9);
+  return {
+    enabled: boolValue(rawEnabled, false),
+    level: Math.min(9, Math.max(1, level)),
+    tempDir: path.resolve(stringValue(rawTempDir, path.join(stateDir, "compressed", safeName)))
+  };
+}
+
+function proxyUrl(root, names = []) {
+  const proxy = root.proxy || {};
+  return stringValue(setting(proxy, root, ["url", "PROXY_URL", "GLOBAL_PROXY_URL", ...names, "SOCKS5_PROXY"]));
+}
+
+function sourceItems(root) {
+  const sources = root.sources || root.source_files || root.sourceFiles || {};
+  if (Array.isArray(sources)) {
+    return { defaults: {}, items: sources };
+  }
+  const items = sources.items || sources.files || sources.source_files || sources.sourceFiles || [];
+  return {
+    defaults: sources.defaults || sources.global || {},
+    items: Array.isArray(items) ? items : []
+  };
+}
+
+function normalizeSource(root, defaults, item, index, stateDir) {
+  const name = stringValue(setting(item, {}, ["name", "NAME"], `source_${index + 1}`));
+  const mode = stringValue(setting(item, defaults, ["mode", "type", "source_type", "SOURCE_MODE"], "files")).toLowerCase();
+  const sourceDir = stringValue(setting(item, defaults, ["source_dir", "dir", "directory", "SOURCE_DIR", "SOURCE_DIRECTORY"]));
+  const pattern = stringValue(setting(item, defaults, [
+    "source_file_pattern",
+    "file_pattern",
+    "pattern",
+    "SOURCE_FILE_PATTERN",
+    "SOURCE_FORMAT",
+    "SOURCE_FILE_FORMAT"
+  ], "*.bak"));
+  const retention = retentionConfig(item, defaults);
+  const safeName = String(name || `source_${index + 1}`)
+    .trim()
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "") || `source_${index + 1}`;
+
+  const compression = compressionConfig(item, defaults, stateDir, safeName);
+
+  return {
+    name,
+    mode,
+    dir: sourceDir,
+    pattern,
+    latestOnly: boolValue(setting(item, defaults, ["latest_only", "SOURCE_LATEST_ONLY", "LATEST_SOURCE_ONLY"], true), true),
+    minAgeSeconds: intValue(setting(item, defaults, ["min_age_seconds", "SOURCE_MIN_AGE_SECONDS"], 10), 10),
+    deleteOnSuccess: boolValue(setting(item, defaults, ["delete_on_success", "DELETE_SOURCE_ON_SUCCESS", "DELETE_SOURCE_AFTER_SUCCESS"], false), false),
+    skipAlreadyTransferred: boolValue(setting(item, defaults, ["skip_already_transferred", "SKIP_ALREADY_TRANSFERRED"], true), true),
+    retentionPolicy: retention.policy,
+    retentionTime: retention.time,
+    retentionTimeMs: retention.timeMs,
+    retentionMinutes: retention.minutes,
+    retentionCount: retention.count,
+    compression
+  };
+}
+
+function legacySourceFromEnv(root, stateDir) {
+  return normalizeSource(root, {
+    source_dir: setting(root, {}, ["SOURCE_DIR", "SOURCE_DIRECTORY"]),
+    source_file_pattern: setting(root, {}, ["SOURCE_FILE_PATTERN", "SOURCE_FORMAT", "SOURCE_FILE_FORMAT"], "*.bak"),
+    latest_only: setting(root, {}, ["SOURCE_LATEST_ONLY", "LATEST_SOURCE_ONLY"], true),
+    min_age_seconds: setting(root, {}, ["SOURCE_MIN_AGE_SECONDS"], 10),
+    delete_on_success: setting(root, {}, ["DELETE_SOURCE_ON_SUCCESS", "DELETE_SOURCE_AFTER_SUCCESS"], false),
+    compression: setting(root, {}, ["COMPRESSION", "COMPRESSION_ENABLED"], false),
+    retention_policy: setting(root, {}, ["RETENTION_POLICY", "SOURCE_RETENTION_POLICY"], "off"),
+    retention_time: setting(root, {}, ["RETENTION_TIME", "SOURCE_RETENTION_TIME", "RETENTION_MINUTES", "SOURCE_RETENTION_MINUTES"], "off"),
+    retention_count: setting(root, {}, ["RETENTION_COUNT", "SOURCE_RETENTION_COUNT"], ""),
+    skip_already_transferred: setting(root, {}, ["SKIP_ALREADY_TRANSFERRED"], true)
+  }, { name: "default" }, 0, stateDir);
+}
+
+function loadConfig() {
+  const { configFile, kind, data } = readConfigFile();
+  const root = data || {};
+  const directory = appDir();
+  const app = root.app || root.application || {};
+  const logging = root.logging || {};
+  const schedule = root.schedule || {};
+  const metrics = root.metrics || {};
+  const destination = root.destination || root.dest || {};
+  const update = root.update || {};
+  const notifications = root.notifications || {};
+  const telegram = notifications.telegram || root.telegram || {};
+  const email = notifications.email || root.email || {};
+  const proxy = root.proxy || {};
+
+  const logsDir = path.resolve(stringValue(setting(logging, app, ["dir", "log_dir", "LOG_DIR"], path.join(directory, "logs"))));
+  const stateDir = path.resolve(stringValue(setting(root.state || {}, app, ["dir", "state_dir", "STATE_DIR"], path.join(directory, "state"))));
+
+  const runOnceOverride = envSetting(["RUN_ONCE"], "");
+  const runOnStartOverride = envSetting(["RUN_ON_START"], "");
+  const { defaults, items } = sourceItems(root);
+  const normalizedSources = items.length > 0
+    ? items.map((item, index) => normalizeSource(root, defaults, item || {}, index, stateDir))
+    : [legacySourceFromEnv(root, stateDir)];
 
   const config = {
     app: {
-      name: firstEnv(["APP_NAME"], "backup-agent"),
-      hostname: firstEnv(["HOSTNAME", "hostname", "SOURCE_HOSTNAME", "source-hostname"], os.hostname()),
-      envFile,
+      name: stringValue(setting(app, root, ["name", "APP_NAME"], "backup-agent")),
+      hostname: stringValue(setting(app, root, ["hostname", "HOSTNAME", "SOURCE_HOSTNAME"], os.hostname()), os.hostname()),
+      configFile,
+      envFile: configFile,
+      configKind: kind,
       appDir: directory,
       logsDir,
       stateDir,
-      logLevel: firstEnv(["LOG_LEVEL"], "info").toLowerCase(),
-      runOnce: envBool(["RUN_ONCE"], false),
-      cron: firstEnv(["CRON_SCHEDULE", "SOURCE_CHECK_CRON"], "0 */5 * * * *"),
-      runOnStart: envBool(["RUN_ON_START"], true),
+      logLevel: stringValue(setting(logging, app, ["level", "log_level", "LOG_LEVEL"], "info")).toLowerCase(),
+      runOnce: boolValue(runOnceOverride || setting(schedule, root, ["run_once", "RUN_ONCE"], false), false),
+      cron: stringValue(setting(schedule, root, ["cron", "cron_schedule", "CRON_SCHEDULE", "SOURCE_CHECK_CRON"], "0 */5 * * * *")),
+      runOnStart: boolValue(runOnStartOverride || setting(schedule, root, ["run_on_start", "RUN_ON_START"], true), true),
       lockFile: path.join(stateDir, "agent.lock"),
       stateFile: path.join(stateDir, "transferred.json")
     },
-    source: {
-      dir: firstEnv(["SOURCE_DIR", "SOURCE_DIRECTORY"]),
-      pattern: firstEnv(["SOURCE_FILE_PATTERN", "SOURCE_FORMAT", "SOURCE_FILE_FORMAT"], "*.bak"),
-      latestOnly: envBool(["SOURCE_LATEST_ONLY", "LATEST_SOURCE_ONLY"], true),
-      deleteOnSuccess: envBool(["DELETE_SOURCE_ON_SUCCESS", "DELETE_SOURCE_AFTER_SUCCESS"], false),
-      skipAlreadyTransferred: envBool(["SKIP_ALREADY_TRANSFERRED"], true),
-      minAgeSeconds: envInt(["SOURCE_MIN_AGE_SECONDS"], 10),
-      retentionPolicy: retention.policy,
-      retentionTime: retention.time,
-      retentionTimeMs: retention.timeMs,
-      retentionMinutes: retention.minutes,
-      retentionCount: retention.count
-    },
-    compression: {
-      enabled: envBool(["COMPRESSION", "COMPRESSION_ENABLED"], false),
-      level: 9,
-      tempDir: path.join(stateDir, "compressed")
-    },
+    sources: normalizedSources,
+    source: normalizedSources[0],
+    compression: normalizedSources[0].compression,
     metrics: {
-      enabled: envBool(["METRICS_ENABLED", "metrics-enabled"], false),
-      host: firstEnv(["METRICS_HOST", "metrics-host"], "0.0.0.0"),
-      port: envInt(["METRICS_PORT", "metrics-port"], 9108),
-      path: firstEnv(["METRICS_PATH", "metrics-path"], "/metrics"),
-      firewallRule: envBool(["METRICS_FIREWALL_RULE", "metrics-firewall-rule"], false),
-      firewallRuleName: firstEnv(["METRICS_FIREWALL_RULE_NAME", "metrics-firewall-rule-name"], "backup-agent metrics")
+      enabled: boolValue(setting(metrics, root, ["enabled", "METRICS_ENABLED"], false), false),
+      host: stringValue(setting(metrics, root, ["host", "METRICS_HOST"], "0.0.0.0")),
+      port: intValue(setting(metrics, root, ["port", "METRICS_PORT"], 9108), 9108),
+      path: stringValue(setting(metrics, root, ["path", "METRICS_PATH"], "/metrics")),
+      firewallRule: boolValue(setting(metrics, root, ["firewall_rule", "METRICS_FIREWALL_RULE"], false), false),
+      firewallRuleName: stringValue(setting(metrics, root, ["firewall_rule_name", "METRICS_FIREWALL_RULE_NAME"], "backup-agent metrics"))
     },
     proxy: {
-      url: proxyUrl()
+      url: proxyUrl(root)
     },
     destination: {
-      host: firstEnv(["DEST_HOST", "DESTINATION_ADDRESS", "DESTINATION_HOST"]),
-      port: envInt(["DEST_PORT", "DESTINATION_PORT"], 22),
-      remoteDir: firstEnv(["DEST_REMOTE_DIR", "DESTINATION_PATH", "DESTINATION_STORAGE_PATH"]),
-      username: firstEnv(["DEST_USER", "DEST_USERNAME", "DESTINATION_USER"]),
-      authMethod: firstEnv(["DEST_AUTH_METHOD", "DESTINATION_AUTH_METHOD"], "password").toLowerCase(),
-      password: firstEnv(["DEST_PASSWORD", "DESTINATION_PASSWORD"]),
-      privateKeyBase64: firstEnv(["DEST_PRIVATE_KEY_BASE64", "PRIVATE_KEY_BASE64", "DESTINATION_PRIVATE_KEY_BASE64"]),
-      readyTimeoutMs: envInt(["SSH_READY_TIMEOUT_MS"], 30000),
-      keepaliveIntervalMs: envInt(["SSH_KEEPALIVE_INTERVAL_MS"], 20000),
-      socks5Enabled: envBool([
+      host: stringValue(setting(destination, root, ["host", "address", "DEST_HOST", "DESTINATION_ADDRESS", "DESTINATION_HOST"])),
+      port: intValue(setting(destination, root, ["port", "DEST_PORT", "DESTINATION_PORT"], 22), 22),
+      remoteDir: stringValue(setting(destination, root, ["remote_dir", "path", "DEST_REMOTE_DIR", "DESTINATION_PATH", "DESTINATION_STORAGE_PATH"])),
+      username: stringValue(setting(destination, root, ["user", "username", "DEST_USER", "DEST_USERNAME", "DESTINATION_USER"])),
+      authMethod: stringValue(setting(destination, root, ["auth_method", "DEST_AUTH_METHOD", "DESTINATION_AUTH_METHOD"], "password")).toLowerCase(),
+      password: stringValue(setting(destination, root, ["password", "DEST_PASSWORD", "DESTINATION_PASSWORD"])),
+      privateKeyBase64: stringValue(setting(destination, root, ["private_key_base64", "DEST_PRIVATE_KEY_BASE64", "PRIVATE_KEY_BASE64", "DESTINATION_PRIVATE_KEY_BASE64"])),
+      readyTimeoutMs: intValue(setting(destination, root, ["ready_timeout_ms", "SSH_READY_TIMEOUT_MS"], 30000), 30000),
+      keepaliveIntervalMs: intValue(setting(destination, root, ["keepalive_interval_ms", "SSH_KEEPALIVE_INTERVAL_MS"], 20000), 20000),
+      socks5Enabled: boolValue(setting(destination, root, [
+        "use_proxy",
         "DESTINATION_USE_PROXY",
         "DEST_USE_PROXY",
         "TRANSFER_USE_PROXY",
@@ -236,48 +409,41 @@ function loadConfig() {
         "SSH_SOCKS5_ENABLED",
         "DEST_SOCKS5_ENABLED",
         "USE_SSH_SOCKS5_PROXY"
-      ], false),
-      socks5Proxy: proxyUrl(["DESTINATION_PROXY", "DEST_PROXY", "SSH_SOCKS5_PROXY", "DEST_SOCKS5_PROXY"]),
-      createDir: envBool(["CREATE_DESTINATION_DIR", "create-destination-dir"], false),
-      dirFormat: firstEnv(["DESTINATION_DIR_FORMAT", "destination-dir-format"], "date").toLowerCase()
+      ], false), false),
+      socks5Proxy: proxyUrl(root, ["DESTINATION_PROXY", "DEST_PROXY", "SSH_SOCKS5_PROXY", "DEST_SOCKS5_PROXY"]),
+      createDir: boolValue(setting(destination, root, ["create_dir", "CREATE_DESTINATION_DIR"], false), false),
+      dirFormat: stringValue(setting(destination, root, ["dir_format", "DESTINATION_DIR_FORMAT"], "date")).toLowerCase()
     },
     update: {
-      url: firstEnv(
-        ["UPDATE_URL", "update-url"],
-        "https://github.com/behnambagheri/windows-file-backup-agent/releases/latest/download/backup-agent-windows.zip"
-      ),
-      useProxy: envBool(["UPDATE_USE_PROXY", "UPDATE_DOWNLOAD_USE_PROXY"], false),
-      proxy: proxyUrl(["UPDATE_PROXY", "UPDATE_DOWNLOAD_PROXY"])
+      url: stringValue(setting(update, root, ["url", "UPDATE_URL"], DEFAULT_UPDATE_URL)),
+      useProxy: boolValue(setting(update, root, ["use_proxy", "UPDATE_USE_PROXY", "UPDATE_DOWNLOAD_USE_PROXY"], false), false),
+      proxy: proxyUrl(root, ["UPDATE_PROXY", "UPDATE_DOWNLOAD_PROXY"])
     },
     telegram: {
-      mode: telegramExplicitEnabled !== ""
-        ? (envBool(["TELEGRAM_ENABLED"], false) ? mode(["TELEGRAM_MODE", "TELEGRAM_SEND_MODE"], "all") : "off")
-        : mode(["TELEGRAM_MODE", "TELEGRAM_SEND_MODE"], "off"),
-      fallback: firstEnv(["TELEGRAM_FALLBACK"], "off").toLowerCase(),
-      apiUrl: firstEnv(["TELEGRAM_API_URL"], "https://api.telegram.org"),
-      useProxy: envBool(["TELEGRAM_USE_PROXY"], false),
-      proxy: proxyUrl(["TELEGRAM_PROXY"]),
-      token: firstEnv(["TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN"]),
-      chatId: firstEnv(["TELEGRAM_CHAT_ID"]),
-      topicId: firstEnv(["TELEGRAM_TOPIC_ID", "TELEGRAM_MESSAGE_THREAD_ID"])
+      mode: modeValue(setting(telegram, root, ["mode", "TELEGRAM_MODE", "TELEGRAM_SEND_MODE"], setting(telegram, root, ["enabled", "TELEGRAM_ENABLED"], "") !== "" ? "all" : "off")),
+      fallback: stringValue(setting(telegram, root, ["fallback", "TELEGRAM_FALLBACK"], "off")).toLowerCase(),
+      apiUrl: stringValue(setting(telegram, root, ["api_url", "TELEGRAM_API_URL"], "https://api.telegram.org")),
+      useProxy: boolValue(setting(telegram, root, ["use_proxy", "TELEGRAM_USE_PROXY"], false), false),
+      proxy: proxyUrl(root, ["TELEGRAM_PROXY"]),
+      token: stringValue(setting(telegram, root, ["bot_token", "token", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN"])),
+      chatId: stringValue(setting(telegram, root, ["chat_id", "TELEGRAM_CHAT_ID"])),
+      topicId: stringValue(setting(telegram, root, ["topic_id", "message_thread_id", "TELEGRAM_TOPIC_ID", "TELEGRAM_MESSAGE_THREAD_ID"]))
     },
     email: {
-      mode: emailExplicitEnabled !== ""
-        ? (envBool(["EMAIL_ENABLED"], false) ? mode(["EMAIL_MODE", "EMAIL_SEND_MODE"], "all") : "off")
-        : mode(["EMAIL_MODE", "EMAIL_SEND_MODE"], "off"),
-      fallback: firstEnv(["EMAIL_FALLBACK"], "off").toLowerCase(),
-      host: firstEnv(["SMTP_HOST", "EMAIL_SMTP_HOST"]),
-      port: envInt(["SMTP_PORT", "EMAIL_SMTP_PORT"], 465),
-      secure: envBool(["SMTP_SSL", "EMAIL_SMTP_SSL"], true),
-      user: firstEnv(["SMTP_USER", "EMAIL_SMTP_USER"]),
-      password: firstEnv(["SMTP_PASSWORD", "EMAIL_SMTP_PASSWORD"]),
-      from: firstEnv(["EMAIL_FROM", "SMTP_FROM"]),
-      to: parseEmailList(firstEnv(["EMAIL_TO"])),
-      cc: parseEmailList(firstEnv(["EMAIL_CC"])),
-      bcc: parseEmailList(firstEnv(["EMAIL_BCC"])),
-      useProxy: envBool(["EMAIL_USE_PROXY", "SMTP_USE_PROXY"], false),
-      proxy: proxyUrl(["EMAIL_PROXY", "SMTP_PROXY"]),
-      subjectPrefix: firstEnv(["EMAIL_SUBJECT_PREFIX"], "[backup-agent]")
+      mode: modeValue(setting(email, root, ["mode", "EMAIL_MODE", "EMAIL_SEND_MODE"], setting(email, root, ["enabled", "EMAIL_ENABLED"], "") !== "" ? "all" : "off")),
+      fallback: stringValue(setting(email, root, ["fallback", "EMAIL_FALLBACK"], "off")).toLowerCase(),
+      host: stringValue(setting(email, root, ["smtp_host", "host", "SMTP_HOST", "EMAIL_SMTP_HOST"])),
+      port: intValue(setting(email, root, ["smtp_port", "port", "SMTP_PORT", "EMAIL_SMTP_PORT"], 465), 465),
+      secure: boolValue(setting(email, root, ["smtp_ssl", "ssl", "secure", "SMTP_SSL", "EMAIL_SMTP_SSL"], true), true),
+      user: stringValue(setting(email, root, ["smtp_user", "user", "SMTP_USER", "EMAIL_SMTP_USER"])),
+      password: stringValue(setting(email, root, ["smtp_password", "password", "SMTP_PASSWORD", "EMAIL_SMTP_PASSWORD"])),
+      from: stringValue(setting(email, root, ["from", "EMAIL_FROM", "SMTP_FROM"])),
+      to: parseEmailList(setting(email, root, ["to", "EMAIL_TO"])),
+      cc: parseEmailList(setting(email, root, ["cc", "EMAIL_CC"])),
+      bcc: parseEmailList(setting(email, root, ["bcc", "EMAIL_BCC"])),
+      useProxy: boolValue(setting(email, root, ["use_proxy", "EMAIL_USE_PROXY", "SMTP_USE_PROXY"], false), false),
+      proxy: proxyUrl(root, ["EMAIL_PROXY", "SMTP_PROXY"]),
+      subjectPrefix: stringValue(setting(email, root, ["subject_prefix", "EMAIL_SUBJECT_PREFIX"], "[backup-agent]"))
     }
   };
 
@@ -315,82 +481,109 @@ function validateProxyRequirement(enabled, proxy, enabledName) {
   return validateSocksProxyUrl(proxy);
 }
 
+function validateSourceConfig(source, index) {
+  const label = `sources.items[${index}]`;
+  const errors = [];
+  if (!source.name) errors.push(`${label}.name is required.`);
+  if (!["files", "directory"].includes(source.mode)) {
+    errors.push(`${label}.mode must be files or directory.`);
+  }
+  if (!source.dir) errors.push(`${label}.source_dir is required.`);
+  if (source.mode === "files" && !source.pattern) {
+    errors.push(`${label}.source_file_pattern is required when mode=files.`);
+  }
+  if (!Number.isInteger(source.minAgeSeconds) || source.minAgeSeconds < 0) {
+    errors.push(`${label}.min_age_seconds must be a non-negative integer.`);
+  }
+  if (!["off", "time", "count"].includes(source.retentionPolicy)) {
+    errors.push(`${label}.retention_policy must be off, time, or count.`);
+  }
+  if (source.retentionPolicy === "time" && !Number.isFinite(source.retentionTimeMs)) {
+    errors.push(`${label}.retention_time must be a duration such as 60m, 1d, 7d, or 3w.`);
+  }
+  if (source.retentionPolicy === "count" && !Number.isFinite(source.retentionCount)) {
+    errors.push(`${label}.retention_count must be a positive integer when retention_policy=count.`);
+  }
+  return errors;
+}
+
 function validateDestinationConfig(config) {
   const errors = [];
-  if (!config.destination.host) errors.push("DEST_HOST is required.");
+  if (!config.destination.host) errors.push("destination.host is required.");
   if (!Number.isInteger(config.destination.port) || config.destination.port < 1 || config.destination.port > 65535) {
-    errors.push("DEST_PORT must be a TCP port from 1 to 65535.");
+    errors.push("destination.port must be a TCP port from 1 to 65535.");
   }
-  if (!config.destination.remoteDir) errors.push("DEST_REMOTE_DIR is required.");
-  if (!config.destination.username) errors.push("DEST_USER is required.");
+  if (!config.destination.remoteDir) errors.push("destination.remote_dir is required.");
+  if (!config.destination.username) errors.push("destination.user is required.");
   if (!["password", "private_key", "key"].includes(config.destination.authMethod)) {
-    errors.push("DEST_AUTH_METHOD must be password or private_key.");
+    errors.push("destination.auth_method must be password or private_key.");
   }
   if (config.destination.authMethod === "password" && !config.destination.password) {
-    errors.push("DEST_PASSWORD is required when DEST_AUTH_METHOD=password.");
+    errors.push("destination.password is required when destination.auth_method=password.");
   }
   if (["private_key", "key"].includes(config.destination.authMethod) && !config.destination.privateKeyBase64) {
-    errors.push("DEST_PRIVATE_KEY_BASE64 is required when DEST_AUTH_METHOD=private_key.");
+    errors.push("destination.private_key_base64 is required when destination.auth_method=private_key.");
   }
   errors.push(...validateProxyRequirement(
     config.destination.socks5Enabled,
     config.destination.socks5Proxy,
-    "DESTINATION_USE_PROXY"
+    "destination.use_proxy"
   ));
   if (config.destination.createDir && !["date", "hostname", "hostname+date"].includes(config.destination.dirFormat)) {
-    errors.push("DESTINATION_DIR_FORMAT must be date, hostname, or hostname+date when CREATE_DESTINATION_DIR=true.");
+    errors.push("destination.dir_format must be date, hostname, or hostname+date when destination.create_dir=true.");
   }
   return errors;
 }
 
 function validateTelegramConfig(config) {
   const errors = [];
-  if (!config.telegram.token) errors.push("TELEGRAM_BOT_TOKEN is required.");
-  if (!config.telegram.chatId) errors.push("TELEGRAM_CHAT_ID is required.");
-  errors.push(...validateProxyRequirement(config.telegram.useProxy, config.telegram.proxy, "TELEGRAM_USE_PROXY"));
+  if (!config.telegram.token) errors.push("notifications.telegram.bot_token is required.");
+  if (!config.telegram.chatId) errors.push("notifications.telegram.chat_id is required.");
+  errors.push(...validateProxyRequirement(config.telegram.useProxy, config.telegram.proxy, "notifications.telegram.use_proxy"));
   return errors;
 }
 
 function validateEmailConfig(config) {
   const errors = [];
-  if (!config.email.host) errors.push("SMTP_HOST is required.");
+  if (!config.email.host) errors.push("notifications.email.smtp_host is required.");
   if (!Number.isInteger(config.email.port) || config.email.port < 1 || config.email.port > 65535) {
-    errors.push("SMTP_PORT must be a TCP port from 1 to 65535.");
+    errors.push("notifications.email.smtp_port must be a TCP port from 1 to 65535.");
   }
-  if (!config.email.from) errors.push("EMAIL_FROM is required.");
-  if (config.email.to.length === 0) errors.push("EMAIL_TO is required.");
-  errors.push(...validateProxyRequirement(config.email.useProxy, config.email.proxy, "EMAIL_USE_PROXY"));
+  if (!config.email.from) errors.push("notifications.email.from is required.");
+  if (config.email.to.length === 0) errors.push("notifications.email.to is required.");
+  errors.push(...validateProxyRequirement(config.email.useProxy, config.email.proxy, "notifications.email.use_proxy"));
   return errors;
 }
 
 function validateConfig(config) {
   const errors = [];
 
-  if (!config.source.dir) errors.push("SOURCE_DIR is required.");
-  if (!config.source.pattern) errors.push("SOURCE_FILE_PATTERN is required.");
-  if (!["off", "time", "count"].includes(config.source.retentionPolicy)) {
-    errors.push("RETENTION_POLICY must be off, time, or count.");
-  }
-  if (config.source.retentionPolicy === "time" && !Number.isFinite(config.source.retentionTimeMs)) {
-    errors.push("RETENTION_TIME must be a duration such as 60m, 1d, 7d, or 3w.");
-  }
-  if (config.source.retentionPolicy === "count" && !Number.isFinite(config.source.retentionCount)) {
-    errors.push("RETENTION_COUNT must be a positive integer when RETENTION_POLICY=count.");
+  if (!Array.isArray(config.sources) || config.sources.length === 0) {
+    errors.push("sources.items must contain at least one source.");
+  } else {
+    const names = new Set();
+    config.sources.forEach((source, index) => {
+      errors.push(...validateSourceConfig(source, index));
+      if (names.has(source.name)) {
+        errors.push(`sources.items[${index}].name must be unique.`);
+      }
+      names.add(source.name);
+    });
   }
   if (config.metrics.enabled) {
     if (!Number.isInteger(config.metrics.port) || config.metrics.port < 1 || config.metrics.port > 65535) {
-      errors.push("METRICS_PORT must be a TCP port from 1 to 65535.");
+      errors.push("metrics.port must be a TCP port from 1 to 65535.");
     }
     if (!config.metrics.path.startsWith("/")) {
-      errors.push("METRICS_PATH must start with /.");
+      errors.push("metrics.path must start with /.");
     }
   }
   errors.push(...validateDestinationConfig(config));
   if (!["off", "email"].includes(config.telegram.fallback)) {
-    errors.push("TELEGRAM_FALLBACK must be off or email.");
+    errors.push("notifications.telegram.fallback must be off or email.");
   }
   if (!["off", "telegram"].includes(config.email.fallback)) {
-    errors.push("EMAIL_FALLBACK must be off or telegram.");
+    errors.push("notifications.email.fallback must be off or telegram.");
   }
   if (config.telegram.mode !== "off") {
     errors.push(...validateTelegramConfig(config));
@@ -412,6 +605,7 @@ module.exports = {
   appDir,
   loadConfig,
   validateConfig,
+  validateSourceConfig,
   validateDestinationConfig,
   validateTelegramConfig,
   validateEmailConfig

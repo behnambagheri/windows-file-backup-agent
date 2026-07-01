@@ -3,6 +3,7 @@ const path = require("path");
 const posix = require("path").posix;
 const crypto = require("crypto");
 const zlib = require("zlib");
+const tar = require("tar");
 const { pipeline } = require("stream/promises");
 const { Client } = require("ssh2");
 const { SocksClient } = require("socks");
@@ -22,10 +23,35 @@ async function statSafe(filePath) {
   }
 }
 
-async function listSourceFiles(config, state, logger) {
-  const dir = config.source.dir;
+function makeFingerprint(filePath, stats) {
+  const input = `${path.resolve(filePath)}|${stats.size}|${Math.floor(stats.mtimeMs)}`;
+  return crypto.createHash("sha256").update(input).digest("hex");
+}
+
+function makeDirectoryFingerprint(rootDir, snapshot) {
+  const hash = crypto.createHash("sha256");
+  hash.update(`${path.resolve(rootDir)}|directory|`);
+  for (const directory of snapshot.directories) {
+    hash.update(`d|${directory.relativePath}|`);
+  }
+  for (const file of snapshot.files) {
+    hash.update(`f|${file.relativePath}|${file.size}|${Math.floor(file.mtimeMs)}|`);
+  }
+  return hash.digest("hex");
+}
+
+function toPosixPath(value) {
+  return String(value || "").split(path.sep).join("/");
+}
+
+function sourceLabel(source) {
+  return source && source.name ? source.name : "default";
+}
+
+async function listSourceFiles(config, state, logger, source = config.source) {
+  const dir = source.dir;
   const entries = await fs.promises.readdir(dir, { withFileTypes: true });
-  const matcher = wildcardToRegex(config.source.pattern);
+  const matcher = wildcardToRegex(source.pattern);
   const now = Date.now();
   const files = [];
 
@@ -42,16 +68,26 @@ async function listSourceFiles(config, state, logger) {
       continue;
     }
     const ageSeconds = Math.floor((now - stats.mtimeMs) / 1000);
-    if (ageSeconds < config.source.minAgeSeconds) {
-      logger.debug("Skipping file because it is too new", { file: filePath, ageSeconds });
+    if (ageSeconds < source.minAgeSeconds) {
+      logger.debug("Skipping file because it is too new", {
+        source: sourceLabel(source),
+        file: filePath,
+        ageSeconds
+      });
       continue;
     }
     const fingerprint = makeFingerprint(filePath, stats);
-    if (config.source.skipAlreadyTransferred && state.transferred[fingerprint]) {
-      logger.debug("Skipping already transferred file", { file: filePath, fingerprint });
+    if (source.skipAlreadyTransferred && state.transferred[fingerprint]) {
+      logger.debug("Skipping already transferred file", {
+        source: sourceLabel(source),
+        file: filePath,
+        fingerprint
+      });
       continue;
     }
     files.push({
+      kind: "file",
+      sourceName: sourceLabel(source),
       name: entry.name,
       path: filePath,
       size: stats.size,
@@ -61,12 +97,122 @@ async function listSourceFiles(config, state, logger) {
   }
 
   files.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  return config.source.latestOnly ? files.slice(0, 1) : files;
+  return source.latestOnly ? files.slice(0, 1) : files;
 }
 
-function makeFingerprint(filePath, stats) {
-  const input = `${path.resolve(filePath)}|${stats.size}|${Math.floor(stats.mtimeMs)}`;
-  return crypto.createHash("sha256").update(input).digest("hex");
+async function collectDirectorySnapshot(rootDir) {
+  const rootStats = await fs.promises.stat(rootDir);
+  const files = [];
+  const directories = [];
+
+  async function walk(currentDir, relativeDir) {
+    const entries = await fs.promises.readdir(currentDir, { withFileTypes: true });
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      const fullPath = path.join(currentDir, entry.name);
+      const relativePath = relativeDir ? path.join(relativeDir, entry.name) : entry.name;
+      if (entry.isDirectory()) {
+        const directory = {
+          path: fullPath,
+          relativePath: toPosixPath(relativePath)
+        };
+        directories.push(directory);
+        await walk(fullPath, relativePath);
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      const stats = await statSafe(fullPath);
+      if (!stats) {
+        continue;
+      }
+      files.push({
+        name: entry.name,
+        path: fullPath,
+        relativePath: toPosixPath(relativePath),
+        size: stats.size,
+        mtimeMs: stats.mtimeMs
+      });
+    }
+  }
+
+  await walk(rootDir, "");
+
+  const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+  const newestMtimeMs = files.reduce(
+    (newest, file) => Math.max(newest, file.mtimeMs),
+    rootStats.mtimeMs
+  );
+  const oldestMtimeMs = files.reduce(
+    (oldest, file) => Math.min(oldest, file.mtimeMs),
+    rootStats.mtimeMs
+  );
+
+  return {
+    rootStats,
+    files,
+    directories,
+    fileCount: files.length,
+    directoryCount: directories.length,
+    totalSize,
+    newestMtimeMs,
+    oldestMtimeMs
+  };
+}
+
+async function listDirectorySource(config, state, logger, source = config.source) {
+  const sourcePath = path.resolve(source.dir);
+  const rootStats = await statSafe(sourcePath);
+  if (!rootStats || !rootStats.isDirectory()) {
+    logger.error("Directory source is not readable", {
+      source: sourceLabel(source),
+      dir: source.dir
+    });
+    return [];
+  }
+
+  const snapshot = await collectDirectorySnapshot(sourcePath);
+  const ageSeconds = Math.floor((Date.now() - snapshot.newestMtimeMs) / 1000);
+  if (ageSeconds < source.minAgeSeconds) {
+    logger.debug("Skipping directory because it has recent changes", {
+      source: sourceLabel(source),
+      dir: sourcePath,
+      ageSeconds
+    });
+    return [];
+  }
+
+  const fingerprint = makeDirectoryFingerprint(sourcePath, snapshot);
+  if (source.skipAlreadyTransferred && state.transferred[fingerprint]) {
+    logger.debug("Skipping already transferred directory snapshot", {
+      source: sourceLabel(source),
+      dir: sourcePath,
+      fingerprint
+    });
+    return [];
+  }
+
+  return [{
+    kind: "directory",
+    sourceName: sourceLabel(source),
+    name: safePathSegment(path.basename(sourcePath) || sourceLabel(source)),
+    path: sourcePath,
+    size: snapshot.totalSize,
+    mtimeMs: snapshot.newestMtimeMs,
+    fingerprint,
+    files: snapshot.files,
+    directories: snapshot.directories,
+    fileCount: snapshot.fileCount,
+    directoryCount: snapshot.directoryCount
+  }];
+}
+
+async function listSourceItems(config, state, logger, source = config.source) {
+  if (source.mode === "directory") {
+    return listDirectorySource(config, state, logger, source);
+  }
+  return listSourceFiles(config, state, logger, source);
 }
 
 function pad(value) {
@@ -262,41 +408,92 @@ function sftpRename(sftp, from, to) {
   });
 }
 
-async function prepareUploadFile(config, file, logger) {
-  if (!config.compression.enabled) {
+async function prepareUploadFile(config, item, source, logger) {
+  const compression = source.compression || { enabled: false, level: 9 };
+  if (!compression.enabled) {
     return {
-      localPath: file.path,
-      remoteName: file.name,
-      uploadSize: file.size,
+      localPath: item.path,
+      remoteName: item.name,
+      uploadSize: item.size,
       compressed: false,
+      directory: item.kind === "directory",
+      directories: item.directories || [],
+      files: item.files || [],
       cleanup: async () => {}
     };
   }
 
-  await fs.promises.mkdir(config.compression.tempDir, { recursive: true });
-  const compressedName = `${file.name}.gz`;
+  await fs.promises.mkdir(compression.tempDir, { recursive: true });
+
+  if (item.kind === "directory") {
+    const archiveName = `${safePathSegment(item.name)}.tar.gz`;
+    const archivePath = path.join(
+      compression.tempDir,
+      `${item.fingerprint.slice(0, 16)}-${archiveName}`
+    );
+
+    logger.info("Compressing source directory before upload", {
+      source: sourceLabel(source),
+      dir: item.path,
+      compressed: archivePath,
+      level: compression.level
+    });
+
+    await tar.c({
+      cwd: path.dirname(item.path),
+      file: archivePath,
+      gzip: { level: compression.level },
+      portable: true
+    }, [path.basename(item.path)]);
+
+    const stats = await fs.promises.stat(archivePath);
+    logger.info("Directory compression completed", {
+      source: sourceLabel(source),
+      dir: item.path,
+      compressed: archivePath,
+      originalSize: item.size,
+      compressedSize: stats.size,
+      fileCount: item.fileCount
+    });
+
+    return {
+      localPath: archivePath,
+      remoteName: archiveName,
+      uploadSize: stats.size,
+      compressed: true,
+      compressionFormat: "tar.gz",
+      directory: false,
+      cleanup: async () => {
+        await fs.promises.unlink(archivePath).catch(() => {});
+      }
+    };
+  }
+
+  const compressedName = `${item.name}.gz`;
   const compressedPath = path.join(
-    config.compression.tempDir,
-    `${file.fingerprint.slice(0, 16)}-${compressedName}`
+    compression.tempDir,
+    `${item.fingerprint.slice(0, 16)}-${compressedName}`
   );
 
   logger.info("Compressing source file before upload", {
-    file: file.path,
+    source: sourceLabel(source),
+    file: item.path,
     compressed: compressedPath,
-    level: config.compression.level
+    level: compression.level
   });
 
   await pipeline(
-    fs.createReadStream(file.path),
-    zlib.createGzip({ level: config.compression.level }),
+    fs.createReadStream(item.path),
+    zlib.createGzip({ level: compression.level }),
     fs.createWriteStream(compressedPath)
   );
 
   const stats = await fs.promises.stat(compressedPath);
   logger.info("Compression completed", {
-    file: file.path,
+    source: sourceLabel(source),
+    file: item.path,
     compressed: compressedPath,
-    originalSize: file.size,
+    originalSize: item.size,
     compressedSize: stats.size
   });
 
@@ -306,43 +503,97 @@ async function prepareUploadFile(config, file, logger) {
     uploadSize: stats.size,
     compressed: true,
     compressionFormat: "gzip",
+    directory: false,
     cleanup: async () => {
       await fs.promises.unlink(compressedPath).catch(() => {});
     }
   };
 }
 
-async function transferOne(config, file, logger) {
+async function uploadDirectory(sftp, prepared, remoteRoot, logger, source) {
+  await ensureRemoteDir(sftp, remoteRoot);
+  for (const directory of prepared.directories) {
+    await ensureRemoteDir(sftp, posix.join(remoteRoot, directory.relativePath));
+  }
+
+  let index = 0;
+  for (const file of prepared.files) {
+    const remotePath = posix.join(remoteRoot, file.relativePath);
+    await ensureRemoteDir(sftp, posix.dirname(remotePath));
+    const tempPath = `${remotePath}.part-${process.pid}-${Date.now()}-${index}`;
+    logger.debug("Uploading directory file", {
+      source: sourceLabel(source),
+      local: file.path,
+      remote: remotePath,
+      size: file.size
+    });
+    await uploadFile(sftp, file.path, tempPath);
+    await sftpRename(sftp, tempPath, remotePath);
+    index += 1;
+  }
+}
+
+async function deleteTransferredSource(item, source, logger) {
+  if (!source.deleteOnSuccess) {
+    return;
+  }
+  if (item.kind === "directory") {
+    await fs.promises.rm(item.path, { recursive: true, force: false });
+    logger.info("Source directory deleted after successful transfer", {
+      source: sourceLabel(source),
+      dir: item.path
+    });
+    return;
+  }
+  await fs.promises.unlink(item.path);
+  logger.info("Source file deleted after successful transfer", {
+    source: sourceLabel(source),
+    file: item.path
+  });
+}
+
+async function transferOne(config, item, source, logger) {
   let conn;
   let prepared;
   let remotePath;
   try {
-    prepared = await prepareUploadFile(config, file, logger);
+    prepared = await prepareUploadFile(config, item, source, logger);
     const remoteDir = destinationDirForFile(config, new Date());
     remotePath = posix.join(remoteDir, prepared.remoteName);
     conn = await connectSsh(config);
     const sftp = await openSftp(conn);
     await ensureRemoteDir(sftp, remoteDir);
-    const tempPath = `${remotePath}.part-${process.pid}-${Date.now()}`;
 
-    logger.info("Starting SFTP upload", {
-      local: prepared.localPath,
-      source: file.path,
-      remote: remotePath,
-      size: prepared.uploadSize,
-      compressed: prepared.compressed
-    });
-    await uploadFile(sftp, prepared.localPath, tempPath);
-    await sftpRename(sftp, tempPath, remotePath);
-
-    if (config.source.deleteOnSuccess) {
-      await fs.promises.unlink(file.path);
-      logger.info("Source file deleted after successful transfer", { file: file.path });
+    if (prepared.directory) {
+      logger.info("Starting recursive SFTP directory upload", {
+        source: sourceLabel(source),
+        local: item.path,
+        remote: remotePath,
+        files: prepared.files.length,
+        size: prepared.uploadSize
+      });
+      await uploadDirectory(sftp, prepared, remotePath, logger, source);
+    } else {
+      const tempPath = `${remotePath}.part-${process.pid}-${Date.now()}`;
+      logger.info("Starting SFTP upload", {
+        source: sourceLabel(source),
+        local: prepared.localPath,
+        sourcePath: item.path,
+        remote: remotePath,
+        size: prepared.uploadSize,
+        compressed: prepared.compressed
+      });
+      await uploadFile(sftp, prepared.localPath, tempPath);
+      await sftpRename(sftp, tempPath, remotePath);
     }
+
+    await deleteTransferredSource(item, source, logger);
 
     return {
       success: true,
-      file,
+      sourceName: sourceLabel(source),
+      sourceMode: source.mode,
+      file: item,
       remotePath,
       compressed: prepared.compressed,
       compressionFormat: prepared.compressionFormat,
@@ -351,10 +602,12 @@ async function transferOne(config, file, logger) {
   } catch (error) {
     return {
       success: false,
-      file,
+      sourceName: sourceLabel(source),
+      sourceMode: source.mode,
+      file: item,
       error,
       remotePath,
-      compressed: prepared ? prepared.compressed : config.compression.enabled,
+      compressed: prepared ? prepared.compressed : !!(source.compression && source.compression.enabled),
       compressionFormat: prepared ? prepared.compressionFormat : undefined,
       uploadSize: prepared ? prepared.uploadSize : undefined
     };
@@ -429,22 +682,31 @@ async function testDestination(config, logger, connect = connectSsh) {
   }
 }
 
-async function runRetentionCleanup(config, logger, protectedFingerprints = new Set()) {
-  if (config.source.retentionPolicy === "off") {
+async function runRetentionCleanup(config, logger, protectedFingerprints = new Set(), source = config.source) {
+  if (source.retentionPolicy === "off") {
     return { deleted: 0, failed: 0 };
   }
 
-  const matcher = wildcardToRegex(config.source.pattern);
+  if (source.mode === "directory") {
+    logger.warn("Retention cleanup skipped for directory source", {
+      source: sourceLabel(source),
+      retentionPolicy: source.retentionPolicy
+    });
+    return { deleted: 0, failed: 0 };
+  }
+
+  const matcher = wildcardToRegex(source.pattern);
   let deleted = 0;
   let failed = 0;
   const candidates = [];
 
   let entries;
   try {
-    entries = await fs.promises.readdir(config.source.dir, { withFileTypes: true });
+    entries = await fs.promises.readdir(source.dir, { withFileTypes: true });
   } catch (error) {
     logger.error("Retention cleanup could not read source directory", {
-      dir: config.source.dir,
+      source: sourceLabel(source),
+      dir: source.dir,
       error: error.message
     });
     return { deleted, failed: failed + 1 };
@@ -454,7 +716,7 @@ async function runRetentionCleanup(config, logger, protectedFingerprints = new S
     if (!entry.isFile() || !matcher.test(entry.name)) {
       continue;
     }
-    const filePath = path.join(config.source.dir, entry.name);
+    const filePath = path.join(source.dir, entry.name);
     const stats = await statSafe(filePath);
     if (!stats) {
       continue;
@@ -469,20 +731,21 @@ async function runRetentionCleanup(config, logger, protectedFingerprints = new S
   }
 
   let deleteCandidates = [];
-  if (config.source.retentionPolicy === "time") {
-    const cutoffMs = Date.now() - config.source.retentionTimeMs;
+  if (source.retentionPolicy === "time") {
+    const cutoffMs = Date.now() - source.retentionTimeMs;
     deleteCandidates = candidates.filter((candidate) => candidate.stats.mtimeMs < cutoffMs);
-  } else if (config.source.retentionPolicy === "count") {
+  } else if (source.retentionPolicy === "count") {
     const sorted = [...candidates].sort((a, b) => b.stats.mtimeMs - a.stats.mtimeMs);
-    deleteCandidates = sorted.slice(config.source.retentionCount);
+    deleteCandidates = sorted.slice(source.retentionCount);
   }
 
   for (const candidate of deleteCandidates) {
     const stats = candidate.stats;
     if (protectedFingerprints.has(candidate.fingerprint)) {
       logger.warn("Retention cleanup kept a failed-transfer file", {
+        source: sourceLabel(source),
         file: candidate.path,
-        retentionPolicy: config.source.retentionPolicy
+        retentionPolicy: source.retentionPolicy
       });
       continue;
     }
@@ -490,15 +753,17 @@ async function runRetentionCleanup(config, logger, protectedFingerprints = new S
       await fs.promises.unlink(candidate.path);
       deleted += 1;
       logger.info("Retention cleanup deleted source file", {
+        source: sourceLabel(source),
         file: candidate.path,
         ageMinutes: Math.floor((Date.now() - stats.mtimeMs) / 60000),
-        retentionPolicy: config.source.retentionPolicy,
-        retentionTime: config.source.retentionPolicy === "time" ? config.source.retentionTime : undefined,
-        retentionCount: config.source.retentionPolicy === "count" ? config.source.retentionCount : undefined
+        retentionPolicy: source.retentionPolicy,
+        retentionTime: source.retentionPolicy === "time" ? source.retentionTime : undefined,
+        retentionCount: source.retentionPolicy === "count" ? source.retentionCount : undefined
       });
     } catch (error) {
       failed += 1;
       logger.error("Retention cleanup failed to delete source file", {
+        source: sourceLabel(source),
         file: candidate.path,
         error: error.message
       });
@@ -507,9 +772,10 @@ async function runRetentionCleanup(config, logger, protectedFingerprints = new S
 
   if (deleted > 0 || failed > 0) {
     logger.info("Retention cleanup finished", {
+      source: sourceLabel(source),
       deleted,
       failed,
-      retentionPolicy: config.source.retentionPolicy,
+      retentionPolicy: source.retentionPolicy,
       matchingFiles: candidates.length
     });
   }
@@ -535,33 +801,40 @@ function saveState(config, state) {
   fs.writeFileSync(config.app.stateFile, JSON.stringify(state, null, 2), "utf8");
 }
 
-async function runTransferCycle(config, logger) {
-  const state = loadState(config);
-  const files = await listSourceFiles(config, state, logger);
-  if (files.length === 0) {
-    logger.info("No matching source files found");
-    await runRetentionCleanup(config, logger);
+async function runSource(config, state, logger, source) {
+  const items = await listSourceItems(config, state, logger, source);
+  if (items.length === 0) {
+    logger.info("No matching source items found", { source: sourceLabel(source), mode: source.mode });
+    await runRetentionCleanup(config, logger, new Set(), source);
     return [];
   }
 
   const results = [];
-  for (const file of files) {
-    const result = await transferOne(config, file, logger);
+  for (const item of items) {
+    const result = await transferOne(config, item, source, logger);
     if (result.success) {
-      state.transferred[file.fingerprint] = {
-        file: file.path,
-        size: file.size,
-        mtimeMs: file.mtimeMs,
+      state.transferred[item.fingerprint] = {
+        source: sourceLabel(source),
+        mode: source.mode,
+        path: item.path,
+        size: item.size,
+        mtimeMs: item.mtimeMs,
         remotePath: result.remotePath,
         compressed: result.compressed,
+        compressionFormat: result.compressionFormat,
         uploadSize: result.uploadSize,
         transferredAt: new Date().toISOString()
       };
       saveState(config, state);
-      logger.info("SFTP upload completed", { local: file.path, remote: result.remotePath });
+      logger.info("SFTP upload completed", {
+        source: sourceLabel(source),
+        local: item.path,
+        remote: result.remotePath
+      });
     } else {
       logger.error("SFTP upload failed", {
-        local: file.path,
+        source: sourceLabel(source),
+        local: item.path,
         remote: result.remotePath,
         compressed: result.compressed,
         error: result.error.message
@@ -569,18 +842,36 @@ async function runTransferCycle(config, logger) {
     }
     results.push(result);
   }
+
   const protectedFingerprints = new Set(
     results
       .filter((result) => !result.success && result.file)
       .map((result) => result.file.fingerprint)
   );
-  await runRetentionCleanup(config, logger, protectedFingerprints);
+  await runRetentionCleanup(config, logger, protectedFingerprints, source);
+  return results;
+}
+
+async function runTransferCycle(config, logger) {
+  const state = loadState(config);
+  const sources = Array.isArray(config.sources) && config.sources.length > 0
+    ? config.sources
+    : [config.source];
+  const results = [];
+
+  for (const source of sources) {
+    const sourceResults = await runSource(config, state, logger, source);
+    results.push(...sourceResults);
+  }
+
   return results;
 }
 
 module.exports = {
   runTransferCycle,
   listSourceFiles,
+  listDirectorySource,
+  listSourceItems,
   runRetentionCleanup,
   loadState,
   saveState,

@@ -43,6 +43,18 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: Validate example config
+        shell: bash
+        run: |
+          CONFIG_FILE=config.yaml.example node - <<'NODE'
+          const { loadConfig, validateConfig } = require('./src/config');
+          const errors = validateConfig(loadConfig());
+          if (errors.length) {
+            console.error(errors.join('\n'));
+            process.exit(1);
+          }
+          NODE
+
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
 
@@ -95,6 +107,9 @@ jobs:
           }
           if (!(Test-Path "backup-agent-windows/node/node.exe")) {
             throw "Packaged node.exe is missing"
+          }
+          if (!(Test-Path "backup-agent-windows/config.yaml.example")) {
+            throw "Packaged config.yaml.example is missing"
           }
           & ".\backup-agent-windows\node\node.exe" ".\backup-agent-windows\app\src\cli.js" version
           if ($LASTEXITCODE -ne 0) {
