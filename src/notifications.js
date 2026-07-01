@@ -218,12 +218,16 @@ async function sendEmail(config, event, logger, force = false) {
   const auth = config.email.user
     ? { user: config.email.user, pass: config.email.password }
     : undefined;
-  const transport = nodemailer.createTransport({
+  const transportOptions = {
     host: config.email.host,
     port: config.email.port,
     secure: config.email.secure,
     auth
-  });
+  };
+  if (config.email.useProxy && config.email.proxy) {
+    transportOptions.proxy = config.email.proxy;
+  }
+  const transport = nodemailer.createTransport(transportOptions);
   const status = event.success ? "SUCCESS" : "FAILED";
   await transport.sendMail({
     from: config.email.from,

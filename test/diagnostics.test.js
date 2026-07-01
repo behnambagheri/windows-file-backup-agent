@@ -40,6 +40,8 @@ function config() {
       to: ["receiver@example.com"],
       cc: [],
       bcc: [],
+      useProxy: false,
+      proxy: "",
       subjectPrefix: "[backup-agent]"
     }
   };
@@ -97,6 +99,28 @@ test("Email diagnostic sends a real test message when mode is off", async () => 
   assert.deepEqual(message.to, ["receiver@example.com"]);
   assert.match(message.subject, /email notification test SUCCESS/);
   assert.match(message.text, /No backup file was transferred/);
+});
+
+test("Email diagnostic uses the shared proxy when enabled", async () => {
+  const originalCreateTransport = nodemailer.createTransport;
+  const testConfig = config();
+  testConfig.email.useProxy = true;
+  testConfig.email.proxy = "socks5://proxy.example:1080";
+  let transportOptions;
+  nodemailer.createTransport = (options) => {
+    transportOptions = options;
+    return {
+      sendMail: async () => {}
+    };
+  };
+
+  try {
+    await testEmail(testConfig, logger());
+  } finally {
+    nodemailer.createTransport = originalCreateTransport;
+  }
+
+  assert.equal(transportOptions.proxy, "socks5://proxy.example:1080");
 });
 
 test("Telegram failure falls back to email even when email mode is off", async () => {

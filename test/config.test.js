@@ -7,16 +7,40 @@ const { loadConfig, validateConfig } = require("../src/config");
 
 const DEFAULT_UPDATE_URL = "https://github.com/behnambagheri/windows-file-backup-agent/releases/latest/download/backup-agent-windows.zip";
 const isolatedEnvironmentKeys = [
+  "PROXY_URL",
+  "GLOBAL_PROXY_URL",
   "UPDATE_URL",
+  "UPDATE_USE_PROXY",
+  "UPDATE_DOWNLOAD_USE_PROXY",
+  "UPDATE_PROXY",
+  "UPDATE_DOWNLOAD_PROXY",
+  "DESTINATION_USE_PROXY",
+  "DESTINATION_PROXY",
+  "DEST_USE_PROXY",
+  "DEST_PROXY",
+  "TRANSFER_USE_PROXY",
+  "SSH_USE_PROXY",
+  "SSH_SOCKS5_ENABLED",
+  "SSH_SOCKS5_PROXY",
+  "DEST_SOCKS5_ENABLED",
+  "DEST_SOCKS5_PROXY",
+  "USE_SSH_SOCKS5_PROXY",
+  "SOCKS5_PROXY",
   "TELEGRAM_ENABLED",
   "TELEGRAM_MODE",
   "TELEGRAM_FALLBACK",
+  "TELEGRAM_USE_PROXY",
+  "TELEGRAM_PROXY",
   "TELEGRAM_BOT_TOKEN",
   "TELEGRAM_TOKEN",
   "TELEGRAM_CHAT_ID",
   "EMAIL_ENABLED",
   "EMAIL_MODE",
   "EMAIL_FALLBACK",
+  "EMAIL_USE_PROXY",
+  "EMAIL_PROXY",
+  "SMTP_USE_PROXY",
+  "SMTP_PROXY",
   "SMTP_HOST",
   "EMAIL_FROM",
   "EMAIL_TO"
@@ -67,6 +91,49 @@ test("default update URL points to the latest GitHub release asset", () => {
   withTestEnv(requiredConfig, (config) => {
     assert.equal(config.update.url, DEFAULT_UPDATE_URL);
     assert.deepEqual(validateConfig(config), []);
+  });
+});
+
+test("shared proxy URL is reused by update, destination, Telegram, and email", () => {
+  const content = [
+    requiredConfig,
+    "PROXY_URL=socks5://proxy.example:1080",
+    "UPDATE_USE_PROXY=on",
+    "DESTINATION_USE_PROXY=on",
+    "TELEGRAM_MODE=all",
+    "TELEGRAM_USE_PROXY=on",
+    "TELEGRAM_BOT_TOKEN=test-token",
+    "TELEGRAM_CHAT_ID=1234",
+    "EMAIL_MODE=all",
+    "EMAIL_USE_PROXY=on",
+    "SMTP_HOST=smtp.example.com",
+    "EMAIL_FROM=sender@example.com",
+    "EMAIL_TO=receiver@example.com"
+  ].join("\n");
+
+  withTestEnv(content, (config) => {
+    assert.equal(config.proxy.url, "socks5://proxy.example:1080");
+    assert.equal(config.update.useProxy, true);
+    assert.equal(config.update.proxy, "socks5://proxy.example:1080");
+    assert.equal(config.destination.socks5Enabled, true);
+    assert.equal(config.destination.socks5Proxy, "socks5://proxy.example:1080");
+    assert.equal(config.telegram.useProxy, true);
+    assert.equal(config.telegram.proxy, "socks5://proxy.example:1080");
+    assert.equal(config.email.useProxy, true);
+    assert.equal(config.email.proxy, "socks5://proxy.example:1080");
+    assert.deepEqual(validateConfig(config), []);
+  });
+});
+
+test("enabled destination proxy requires a shared proxy URL", () => {
+  const content = [
+    requiredConfig,
+    "DESTINATION_USE_PROXY=true"
+  ].join("\n");
+
+  withTestEnv(content, (config) => {
+    const errors = validateConfig(config);
+    assert.ok(errors.includes("PROXY_URL is required when DESTINATION_USE_PROXY=true."));
   });
 });
 

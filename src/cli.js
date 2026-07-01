@@ -30,7 +30,6 @@ Usage:
   backup-agent start
   backup-agent stop
   backup-agent restart
-  backup-agent reload-env
   backup-agent edit-env
   backup-agent metrics status
   backup-agent metrics enable [--port 9108] [--host 0.0.0.0] [--path /metrics] [--firewall]
@@ -50,7 +49,7 @@ Notes:
   edit-env opens the active .env in elevated Notepad.
   Notification tests send a real test message even when the notification mode is off.
   The destination test writes, verifies, and removes a temporary file over SFTP.
-  start, stop, restart, reload-env, update, and uninstall should be run from an
+  start, stop, restart, update, and uninstall should be run from an
   elevated PowerShell window when the Scheduled Task was installed as SYSTEM.`;
 }
 
@@ -333,14 +332,14 @@ function setEnvValues(envFile, updates) {
 
 function restartAfterConfigChange() {
   if (!isWindows()) {
-    console.log("Config updated. Run backup-agent reload-env on Windows to apply it.");
+    console.log("Config updated. Run backup-agent restart on Windows if the running service needs to reload it.");
     return;
   }
   const result = restartTaskResult();
   if (result.status !== 0) {
     if (result.stdout.trim()) process.stdout.write(result.stdout);
     if (result.stderr.trim()) process.stderr.write(result.stderr);
-    console.log("Config updated, but automatic restart failed. Run backup-agent reload-env from elevated PowerShell.");
+    console.log("Config updated, but automatic restart failed. Run backup-agent restart from elevated PowerShell if needed.");
     return;
   }
   if (result.stdout.trim()) process.stdout.write(result.stdout);
@@ -500,6 +499,10 @@ function updateAgent() {
     console.error("UPDATE_URL is empty.");
     process.exit(1);
   }
+  if (config.update.useProxy && !config.update.proxy) {
+    console.error("PROXY_URL is required when UPDATE_USE_PROXY=true.");
+    process.exit(1);
+  }
 
   const scriptPath = path.join(os.tmpdir(), `backup-agent-update-${Date.now()}.ps1`);
   const script = `
@@ -507,6 +510,8 @@ $ErrorActionPreference = "Stop"
 $UpdateUrl = ${quotePowerShell(updateUrl)}
 $InstallDir = ${quotePowerShell(installDir)}
 $TaskName = ${quotePowerShell(TASK_NAME)}
+$UseProxy = ${config.update.useProxy ? "$true" : "$false"}
+$ProxyUrl = ${quotePowerShell(config.update.proxy || "")}
 $CallerPid = ${process.pid}
 $WorkDir = Join-Path $env:TEMP ("backup-agent-update-" + [guid]::NewGuid().ToString())
 $LogPath = Join-Path $env:TEMP "backup-agent-update.log"
@@ -524,7 +529,28 @@ try {
     $ExtractDir = Join-Path $WorkDir "extract"
 
     Log "Downloading update from $UpdateUrl"
-    Invoke-WebRequest -Uri $UpdateUrl -OutFile $ZipPath -UseBasicParsing
+    $NodeExe = Join-Path $InstallDir "node\\node.exe"
+    $Downloader = Join-Path $InstallDir "app\\src\\update-download.js"
+    if ((Test-Path $NodeExe) -and (Test-Path $Downloader)) {
+        $env:BACKUP_AGENT_UPDATE_URL = $UpdateUrl
+        $env:BACKUP_AGENT_UPDATE_OUTPUT = $ZipPath
+        $env:BACKUP_AGENT_UPDATE_USE_PROXY = if ($UseProxy) { "true" } else { "false" }
+        $env:BACKUP_AGENT_PROXY_URL = $ProxyUrl
+        & $NodeExe $Downloader
+        if ($LASTEXITCODE -ne 0) {
+            throw "Update download failed with exit code $LASTEXITCODE."
+        }
+    } else {
+        $Request = @{
+            Uri = $UpdateUrl
+            OutFile = $ZipPath
+            UseBasicParsing = $true
+        }
+        if ($UseProxy) {
+            $Request.Proxy = $ProxyUrl
+        }
+        Invoke-WebRequest @Request
+    }
 
     Log "Extracting update package"
     Expand-Archive -Path $ZipPath -DestinationPath $ExtractDir -Force
@@ -667,7 +693,6 @@ async function main() {
       stopTask();
       break;
     case "restart":
-    case "reload-env":
       restartTask();
       break;
     case "edit-env":

@@ -69,6 +69,10 @@ function envInt(names, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function proxyUrl(names = []) {
+  return firstEnv(["PROXY_URL", "GLOBAL_PROXY_URL", ...names, "SOCKS5_PROXY"]);
+}
+
 function mode(names, fallback = "off") {
   const value = firstEnv(names, fallback).toLowerCase();
   if (["all", "success", "failures", "failure", "failed", "errors", "error", "off", "none", "false", "disabled"].includes(value)) {
@@ -211,6 +215,9 @@ function loadConfig() {
       firewallRule: envBool(["METRICS_FIREWALL_RULE", "metrics-firewall-rule"], false),
       firewallRuleName: firstEnv(["METRICS_FIREWALL_RULE_NAME", "metrics-firewall-rule-name"], "backup-agent metrics")
     },
+    proxy: {
+      url: proxyUrl()
+    },
     destination: {
       host: firstEnv(["DEST_HOST", "DESTINATION_ADDRESS", "DESTINATION_HOST"]),
       port: envInt(["DEST_PORT", "DESTINATION_PORT"], 22),
@@ -221,8 +228,16 @@ function loadConfig() {
       privateKeyBase64: firstEnv(["DEST_PRIVATE_KEY_BASE64", "PRIVATE_KEY_BASE64", "DESTINATION_PRIVATE_KEY_BASE64"]),
       readyTimeoutMs: envInt(["SSH_READY_TIMEOUT_MS"], 30000),
       keepaliveIntervalMs: envInt(["SSH_KEEPALIVE_INTERVAL_MS"], 20000),
-      socks5Enabled: envBool(["SSH_SOCKS5_ENABLED", "DEST_SOCKS5_ENABLED", "USE_SSH_SOCKS5_PROXY"], false),
-      socks5Proxy: firstEnv(["SSH_SOCKS5_PROXY", "DEST_SOCKS5_PROXY", "SOCKS5_PROXY"]),
+      socks5Enabled: envBool([
+        "DESTINATION_USE_PROXY",
+        "DEST_USE_PROXY",
+        "TRANSFER_USE_PROXY",
+        "SSH_USE_PROXY",
+        "SSH_SOCKS5_ENABLED",
+        "DEST_SOCKS5_ENABLED",
+        "USE_SSH_SOCKS5_PROXY"
+      ], false),
+      socks5Proxy: proxyUrl(["DESTINATION_PROXY", "DEST_PROXY", "SSH_SOCKS5_PROXY", "DEST_SOCKS5_PROXY"]),
       createDir: envBool(["CREATE_DESTINATION_DIR", "create-destination-dir"], false),
       dirFormat: firstEnv(["DESTINATION_DIR_FORMAT", "destination-dir-format"], "date").toLowerCase()
     },
@@ -230,7 +245,9 @@ function loadConfig() {
       url: firstEnv(
         ["UPDATE_URL", "update-url"],
         "https://github.com/behnambagheri/windows-file-backup-agent/releases/latest/download/backup-agent-windows.zip"
-      )
+      ),
+      useProxy: envBool(["UPDATE_USE_PROXY", "UPDATE_DOWNLOAD_USE_PROXY"], false),
+      proxy: proxyUrl(["UPDATE_PROXY", "UPDATE_DOWNLOAD_PROXY"])
     },
     telegram: {
       mode: telegramExplicitEnabled !== ""
@@ -239,7 +256,7 @@ function loadConfig() {
       fallback: firstEnv(["TELEGRAM_FALLBACK"], "off").toLowerCase(),
       apiUrl: firstEnv(["TELEGRAM_API_URL"], "https://api.telegram.org"),
       useProxy: envBool(["TELEGRAM_USE_PROXY"], false),
-      proxy: firstEnv(["TELEGRAM_PROXY"]),
+      proxy: proxyUrl(["TELEGRAM_PROXY"]),
       token: firstEnv(["TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN"]),
       chatId: firstEnv(["TELEGRAM_CHAT_ID"]),
       topicId: firstEnv(["TELEGRAM_TOPIC_ID", "TELEGRAM_MESSAGE_THREAD_ID"])
@@ -258,11 +275,44 @@ function loadConfig() {
       to: parseEmailList(firstEnv(["EMAIL_TO"])),
       cc: parseEmailList(firstEnv(["EMAIL_CC"])),
       bcc: parseEmailList(firstEnv(["EMAIL_BCC"])),
+      useProxy: envBool(["EMAIL_USE_PROXY", "SMTP_USE_PROXY"], false),
+      proxy: proxyUrl(["EMAIL_PROXY", "SMTP_PROXY"]),
       subjectPrefix: firstEnv(["EMAIL_SUBJECT_PREFIX"], "[backup-agent]")
     }
   };
 
   return config;
+}
+
+function validateSocksProxyUrl(value) {
+  const errors = [];
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return ["PROXY_URL must be a SOCKS proxy URL such as socks5://127.0.0.1:1080."];
+  }
+
+  if (!["socks4:", "socks4a:", "socks5:", "socks5h:"].includes(parsed.protocol)) {
+    errors.push("PROXY_URL must use socks4://, socks4a://, socks5://, or socks5h://.");
+  }
+  if (!parsed.hostname) {
+    errors.push("PROXY_URL must include a proxy host.");
+  }
+  if (parsed.port && (!Number.isInteger(Number.parseInt(parsed.port, 10)) || Number.parseInt(parsed.port, 10) < 1 || Number.parseInt(parsed.port, 10) > 65535)) {
+    errors.push("PROXY_URL proxy port must be from 1 to 65535.");
+  }
+  return errors;
+}
+
+function validateProxyRequirement(enabled, proxy, enabledName) {
+  if (!enabled) {
+    return [];
+  }
+  if (!proxy) {
+    return [`PROXY_URL is required when ${enabledName}=true.`];
+  }
+  return validateSocksProxyUrl(proxy);
 }
 
 function validateDestinationConfig(config) {
@@ -282,9 +332,11 @@ function validateDestinationConfig(config) {
   if (["private_key", "key"].includes(config.destination.authMethod) && !config.destination.privateKeyBase64) {
     errors.push("DEST_PRIVATE_KEY_BASE64 is required when DEST_AUTH_METHOD=private_key.");
   }
-  if (config.destination.socks5Enabled && !config.destination.socks5Proxy) {
-    errors.push("SSH_SOCKS5_PROXY is required when SSH_SOCKS5_ENABLED=true.");
-  }
+  errors.push(...validateProxyRequirement(
+    config.destination.socks5Enabled,
+    config.destination.socks5Proxy,
+    "DESTINATION_USE_PROXY"
+  ));
   if (config.destination.createDir && !["date", "hostname", "hostname+date"].includes(config.destination.dirFormat)) {
     errors.push("DESTINATION_DIR_FORMAT must be date, hostname, or hostname+date when CREATE_DESTINATION_DIR=true.");
   }
@@ -295,9 +347,7 @@ function validateTelegramConfig(config) {
   const errors = [];
   if (!config.telegram.token) errors.push("TELEGRAM_BOT_TOKEN is required.");
   if (!config.telegram.chatId) errors.push("TELEGRAM_CHAT_ID is required.");
-  if (config.telegram.useProxy && !config.telegram.proxy) {
-    errors.push("TELEGRAM_PROXY is required when TELEGRAM_USE_PROXY=true.");
-  }
+  errors.push(...validateProxyRequirement(config.telegram.useProxy, config.telegram.proxy, "TELEGRAM_USE_PROXY"));
   return errors;
 }
 
@@ -309,6 +359,7 @@ function validateEmailConfig(config) {
   }
   if (!config.email.from) errors.push("EMAIL_FROM is required.");
   if (config.email.to.length === 0) errors.push("EMAIL_TO is required.");
+  errors.push(...validateProxyRequirement(config.email.useProxy, config.email.proxy, "EMAIL_USE_PROXY"));
   return errors;
 }
 

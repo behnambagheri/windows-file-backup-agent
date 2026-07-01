@@ -82,7 +82,6 @@ backup-agent logs --lines 200
 backup-agent start
 backup-agent stop
 backup-agent restart
-backup-agent reload-env
 backup-agent edit-env
 backup-agent metrics status
 backup-agent metrics enable --port 9108 --firewall
@@ -100,9 +99,8 @@ backup-agent uninstall --remove-data
 backup-agent version
 ```
 
-`reload-env` restarts the Scheduled Task so the agent reads the latest `.env`.
 `edit-env` opens the active `.env` in elevated Notepad and creates it from
-`.env.example` when it does not exist. Run `backup-agent reload-env` after saving.
+`.env.example` when it does not exist.
 
 The test commands use the current `.env` settings. Telegram and email tests send
 a real diagnostic message even when their notification mode is `off`.
@@ -110,7 +108,7 @@ a real diagnostic message even when their notification mode is `off`.
 writes and verifies a temporary file there, and removes the file afterward.
 The aliases `test-telegram`, `test-email`, and `test-destination` are also available.
 
-Run `start`, `stop`, `restart`, `reload-env`, `update`, and `uninstall` from an elevated PowerShell window when the task was installed as `SYSTEM`.
+Run `start`, `stop`, `restart`, `update`, and `uninstall` from an elevated PowerShell window when the task was installed as `SYSTEM`.
 
 ## Config
 
@@ -129,7 +127,9 @@ Important keys:
 ```dotenv
 CRON_SCHEDULE=0 */5 * * * *
 HOSTNAME=
+PROXY_URL=socks5://127.0.0.1:1080
 UPDATE_URL=https://github.com/behnambagheri/windows-file-backup-agent/releases/latest/download/backup-agent-windows.zip
+UPDATE_USE_PROXY=false
 METRICS_ENABLED=false
 METRICS_HOST=0.0.0.0
 METRICS_PORT=9108
@@ -145,8 +145,7 @@ DESTINATION_DIR_FORMAT=date
 DEST_AUTH_METHOD=password
 DEST_PASSWORD=change-me
 DEST_PRIVATE_KEY_BASE64=
-SSH_SOCKS5_ENABLED=false
-SSH_SOCKS5_PROXY=socks5://127.0.0.1:1080
+DESTINATION_USE_PROXY=false
 
 SOURCE_DIR=C:\Backups
 SOURCE_FILE_PATTERN=*.bak
@@ -162,13 +161,13 @@ TELEGRAM_MODE=failures
 TELEGRAM_FALLBACK=off
 TELEGRAM_API_URL=https://api.telegram.org
 TELEGRAM_USE_PROXY=false
-TELEGRAM_PROXY=socks5://127.0.0.1:1080
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 TELEGRAM_TOPIC_ID=
 
 EMAIL_MODE=off
 EMAIL_FALLBACK=off
+EMAIL_USE_PROXY=false
 SMTP_HOST=smtp.example.com
 SMTP_PORT=465
 SMTP_SSL=true
@@ -177,6 +176,11 @@ SMTP_PASSWORD=
 EMAIL_FROM=backup-agent@example.com
 EMAIL_TO=admin@example.com
 ```
+
+Use `PROXY_URL` once for the shared SOCKS proxy address, then enable it only
+where needed with `UPDATE_USE_PROXY`, `DESTINATION_USE_PROXY`,
+`TELEGRAM_USE_PROXY`, and `EMAIL_USE_PROXY`. Boolean values accept `true`,
+`false`, `on`, and `off`.
 
 `CRON_SCHEDULE` uses six fields:
 
@@ -312,7 +316,6 @@ backup-agent metrics disable
 backup-agent firewall status
 backup-agent firewall add --port 9108
 backup-agent firewall remove
-backup-agent reload-env
 ```
 
 `install.ps1` creates or updates the Windows Firewall inbound rule when both `METRICS_ENABLED=true` and `METRICS_FIREWALL_RULE=true` are set in `.env`.
@@ -335,6 +338,7 @@ Set:
 
 ```dotenv
 UPDATE_URL=https://github.com/behnambagheri/windows-file-backup-agent/releases/latest/download/backup-agent-windows.zip
+UPDATE_USE_PROXY=false
 ```
 
 Then run:
@@ -344,6 +348,7 @@ backup-agent update
 ```
 
 The update command downloads the zip, extracts it, stops the Scheduled Task, installs the downloaded version into the current install directory, and starts the task again. The command creates an elevated PowerShell updater, so Windows may show a UAC prompt.
+Set `UPDATE_USE_PROXY=true` to download through `PROXY_URL`.
 
 ## Private Key Auth
 
