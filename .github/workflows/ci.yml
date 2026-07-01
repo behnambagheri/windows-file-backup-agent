@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check JavaScript syntax
+        run: npm run check
+
+      - name: Run tests
+        run: npm test
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+  build-windows:
+    name: Build Windows package
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate PowerShell syntax
+        shell: pwsh
+        run: |
+          foreach ($file in @("install.ps1", "uninstall.ps1")) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error $_.Message }
+              throw "PowerShell syntax validation failed for $file"
+            }
+          }
+
+      - name: Prepare bundled Windows Node.js runtime
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path ".runtime/windows-node" | Out-Null
+          Copy-Item -Force (Get-Command node).Source ".runtime/windows-node/node.exe"
+
+      - name: Build self-contained Windows package
+        run: npm run package:win
+
+      - name: Verify package
+        shell: pwsh
+        run: |
+          $expected = ((Get-Content "backup-agent-windows.sha256" -Raw).Trim() -split "\s+")[0]
+          $actual = (Get-FileHash "backup-agent-windows.zip" -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $expected) {
+            throw "SHA256 mismatch: expected $expected, got $actual"
+          }
+          if (!(Test-Path "backup-agent-windows/node/node.exe")) {
+            throw "Packaged node.exe is missing"
+          }
+          & ".\backup-agent-windows\node\node.exe" ".\backup-agent-windows\app\src\cli.js" version
+          if ($LASTEXITCODE -ne 0) {
+            throw "Packaged CLI smoke test failed"
+          }
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: backup-agent-windows-${{ github.sha }}
+          path: |
+            backup-agent-windows.zip
+            backup-agent-windows.sha256
+          if-no-files-found: error
+          retention-days: 30

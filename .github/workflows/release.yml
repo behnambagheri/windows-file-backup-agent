@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check JavaScript syntax
+        run: npm run check
+
+      - name: Run tests
+        run: npm test
+
+      - name: Validate release version
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          if ($env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Tag $env:GITHUB_REF_NAME does not match package version v$version"
+          }
+
+      - name: Prepare bundled Windows Node.js runtime
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path ".runtime/windows-node" | Out-Null
+          Copy-Item -Force (Get-Command node).Source ".runtime/windows-node/node.exe"
+
+      - name: Build self-contained Windows package
+        run: npm run package:win
+
+      - name: Verify release assets
+        shell: pwsh
+        run: |
+          $expected = ((Get-Content "backup-agent-windows.sha256" -Raw).Trim() -split "\s+")[0]
+          $actual = (Get-FileHash "backup-agent-windows.zip" -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $expected) {
+            throw "SHA256 mismatch: expected $expected, got $actual"
+          }
+          & ".\backup-agent-windows\node\node.exe" ".\backup-agent-windows\app\src\cli.js" version
+          if ($LASTEXITCODE -ne 0) {
+            throw "Packaged CLI smoke test failed"
+          }
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:GITHUB_REF_NAME backup-agent-windows.zip backup-agent-windows.sha256 --clobber --repo $env:GITHUB_REPOSITORY
+          } else {
+            gh release create $env:GITHUB_REF_NAME backup-agent-windows.zip backup-agent-windows.sha256 --verify-tag --generate-notes --latest --title "backup-agent $env:GITHUB_REF_NAME" --repo $env:GITHUB_REPOSITORY
+          }
+          if ($LASTEXITCODE -ne 0) {
+            throw "GitHub release publication failed"
+          }

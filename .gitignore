@@ -1,0 +1,14 @@
+.DS_Store
+.idea/
+.runtime/
+.env
+node_modules/
+logs/
+state/
+work/
+coverage/
+*.log
+*.zip
+*.sha256
+backup-agent-windows/
+env-ssh-bak-agent-windows/
