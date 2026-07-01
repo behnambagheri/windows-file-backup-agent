@@ -107,9 +107,15 @@ test("Email diagnostic uses the shared proxy when enabled", async () => {
   testConfig.email.useProxy = true;
   testConfig.email.proxy = "socks5://proxy.example:1080";
   let transportOptions;
+  let registeredSocksModule;
   nodemailer.createTransport = (options) => {
     transportOptions = options;
     return {
+      set: (key, value) => {
+        if (key === "proxy_socks_module") {
+          registeredSocksModule = value;
+        }
+      },
       sendMail: async () => {}
     };
   };
@@ -121,6 +127,7 @@ test("Email diagnostic uses the shared proxy when enabled", async () => {
   }
 
   assert.equal(transportOptions.proxy, "socks5://proxy.example:1080");
+  assert.equal(typeof registeredSocksModule.SocksClient.createConnection, "function");
 });
 
 test("Telegram failure falls back to email even when email mode is off", async () => {

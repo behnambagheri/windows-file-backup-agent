@@ -2,6 +2,7 @@ const os = require("os");
 const dns = require("dns").promises;
 const axios = require("axios");
 const nodemailer = require("nodemailer");
+const socks = require("socks");
 const { SocksProxyAgent } = require("socks-proxy-agent");
 
 function shouldSend(mode, success) {
@@ -228,6 +229,9 @@ async function sendEmail(config, event, logger, force = false) {
     transportOptions.proxy = config.email.proxy;
   }
   const transport = nodemailer.createTransport(transportOptions);
+  if (config.email.useProxy && config.email.proxy && typeof transport.set === "function") {
+    transport.set("proxy_socks_module", socks);
+  }
   const status = event.success ? "SUCCESS" : "FAILED";
   await transport.sendMail({
     from: config.email.from,
