@@ -270,6 +270,37 @@ sources:
       retention_count: 2
 ```
 
+To use both limits safely, use `smart`. It keeps the union of both policies: files newer than `retention_time` and the newest `retention_count` files. This means the rule that preserves more files wins.
+
+```yaml
+sources:
+  items:
+    - name: database_backups
+      source_dir: 'C:\Backups\Database'
+      retention_policy: smart
+      retention_time: 5d
+      retention_count: 30
+```
+
+For long backup history, use `perspective`. It keeps all backups in the current scope, then keeps the oldest representative from larger calendar buckets.
+
+```yaml
+sources:
+  items:
+    - name: database_backups
+      source_dir: 'C:\Backups\Database'
+      retention_policy: perspective
+      perspective_scope: day
+```
+
+Supported `perspective_scope` values:
+
+- `hour`: keep all files from the current hour, then hourly, weekly, monthly, and yearly representatives.
+- `day`: keep all files from today, then one oldest file per week in the current month, one oldest file per month in the current year, and one oldest file per older year.
+- `week`: keep all files from the current week, then one oldest file per month in the current year and one oldest file per older year.
+- `month`: keep all files from the current month, then one oldest file per month in the current year and one oldest file per older year.
+- `year`: keep all files from the current year, then one oldest file per older year.
+
 Retention only deletes files matching that source's `source_file_pattern`. If a file was selected for upload and that upload failed, retention keeps it even when it would otherwise be deleted.
 
 ## Proxy

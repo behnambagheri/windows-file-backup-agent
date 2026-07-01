@@ -231,7 +231,9 @@ class Metrics {
       "# HELP backup_agent_config_retention_minutes Configured time retention in minutes by source, or 0 when disabled.",
       "# TYPE backup_agent_config_retention_minutes gauge",
       "# HELP backup_agent_config_retention_count Configured count retention by source, or 0 when disabled.",
-      "# TYPE backup_agent_config_retention_count gauge"
+      "# TYPE backup_agent_config_retention_count gauge",
+      "# HELP backup_agent_config_retention_perspective_scope Configured perspective retention scope by source. Value is 1 when perspective retention is enabled.",
+      "# TYPE backup_agent_config_retention_perspective_scope gauge"
     );
 
     for (const source of sources) {
@@ -242,6 +244,10 @@ class Metrics {
       }));
       lines.push(metricLine("backup_agent_config_retention_minutes", source.retentionMinutes || 0, sourceMetricLabels));
       lines.push(metricLine("backup_agent_config_retention_count", source.retentionCount || 0, sourceMetricLabels));
+      lines.push(metricLine("backup_agent_config_retention_perspective_scope", source.retentionPolicy === "perspective" ? 1 : 0, {
+        ...sourceMetricLabels,
+        scope: source.retentionPerspectiveScope || "none"
+      }));
     }
 
     lines.push(

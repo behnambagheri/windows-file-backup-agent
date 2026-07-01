@@ -147,7 +147,10 @@ async function main() {
       dir: source.dir,
       pattern: source.mode === "files" ? source.pattern : undefined,
       compression: source.compression.enabled,
-      retentionPolicy: source.retentionPolicy
+      retentionPolicy: source.retentionPolicy,
+      retentionTime: ["time", "smart"].includes(source.retentionPolicy) ? source.retentionTime : undefined,
+      retentionCount: ["count", "smart"].includes(source.retentionPolicy) ? source.retentionCount : undefined,
+      retentionPerspectiveScope: source.retentionPolicy === "perspective" ? source.retentionPerspectiveScope : undefined
     })),
     sourceHost: config.app.hostname,
     destinationHost: config.destination.host,

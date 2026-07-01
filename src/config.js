@@ -188,10 +188,18 @@ function retentionConfig(primary, fallback) {
     "RETENTION_POLICY",
     "SOURCE_RETENTION_POLICY"
   ], "")).toLowerCase();
+  const perspectiveScope = stringValue(setting(primary, fallback, [
+    "perspective_scope",
+    "retention_perspective_scope",
+    "RETENTION_PERSPECTIVE_SCOPE",
+    "SOURCE_RETENTION_PERSPECTIVE_SCOPE"
+  ], "")).toLowerCase();
 
   let policy = explicitPolicy;
   if (policy === "") {
-    if (!disabledValue(retentionCountRaw)) {
+    if (!disabledValue(retentionCountRaw) && !disabledValue(retentionTime)) {
+      policy = "smart";
+    } else if (!disabledValue(retentionCountRaw)) {
       policy = "count";
     } else if (!disabledValue(retentionTime)) {
       policy = "time";
@@ -203,14 +211,15 @@ function retentionConfig(primary, fallback) {
     policy = "off";
   }
 
-  const timeMs = policy === "time" ? parseDurationMs(retentionTime) : null;
-  const count = policy === "count" ? parsePositiveInt(retentionCountRaw) : null;
+  const timeMs = ["time", "smart"].includes(policy) ? parseDurationMs(retentionTime) : null;
+  const count = ["count", "smart"].includes(policy) ? parsePositiveInt(retentionCountRaw) : null;
   return {
     policy,
     time: stringValue(retentionTime, "off"),
     timeMs,
     minutes: Number.isFinite(timeMs) ? Math.ceil(timeMs / 60000) : null,
-    count
+    count,
+    perspectiveScope
   };
 }
 
@@ -323,6 +332,7 @@ function normalizeSource(root, defaults, item, index, stateDir) {
     retentionTimeMs: retention.timeMs,
     retentionMinutes: retention.minutes,
     retentionCount: retention.count,
+    retentionPerspectiveScope: retention.perspectiveScope,
     compression
   };
 }
@@ -484,14 +494,20 @@ function validateSourceConfig(source, index) {
   if (!Number.isInteger(source.minAgeSeconds) || source.minAgeSeconds < 0) {
     errors.push(`${label}.min_age_seconds must be a non-negative integer.`);
   }
-  if (!["off", "time", "count"].includes(source.retentionPolicy)) {
-    errors.push(`${label}.retention_policy must be off, time, or count.`);
+  if (!["off", "time", "count", "smart", "perspective"].includes(source.retentionPolicy)) {
+    errors.push(`${label}.retention_policy must be off, time, count, smart, or perspective.`);
   }
-  if (source.retentionPolicy === "time" && !Number.isFinite(source.retentionTimeMs)) {
+  if (["time", "smart"].includes(source.retentionPolicy) && !Number.isFinite(source.retentionTimeMs)) {
     errors.push(`${label}.retention_time must be a duration such as 60m, 1d, 7d, or 3w.`);
   }
-  if (source.retentionPolicy === "count" && !Number.isFinite(source.retentionCount)) {
-    errors.push(`${label}.retention_count must be a positive integer when retention_policy=count.`);
+  if (["count", "smart"].includes(source.retentionPolicy) && !Number.isFinite(source.retentionCount)) {
+    errors.push(`${label}.retention_count must be a positive integer when retention_policy=count or smart.`);
+  }
+  if (
+    source.retentionPolicy === "perspective" &&
+    !["hour", "day", "week", "month", "year"].includes(source.retentionPerspectiveScope)
+  ) {
+    errors.push(`${label}.perspective_scope must be hour, day, week, month, or year when retention_policy=perspective.`);
   }
   return errors;
 }

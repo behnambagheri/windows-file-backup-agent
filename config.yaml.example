@@ -150,17 +150,32 @@ sources:
     # Directory mode true uploads the source directory as .tar.gz; false uploads it recursively over SFTP.
     compression: false
 
-    # Source cleanup strategy. Allowed values: off, time, count.
+    # Source cleanup strategy.
+    # Allowed values:
+    # - off: do not delete old matching source files.
+    # - time: delete matching files older than retention_time.
+    # - count: keep the newest retention_count matching files.
+    # - smart: combine retention_time and retention_count, then keep whichever preserves more files.
+    # - perspective: keep calendar representatives for long-term backup history.
     # Retention applies only to mode=files sources and only to files matching source_file_pattern.
     retention_policy: off
 
-    # Used when retention_policy is time.
+    # Used when retention_policy is time or smart.
     # Units: s=seconds, m=minutes, h=hours, d=days, w=weeks.
     # Examples: 60m, 1d, 7d, 3w.
     retention_time: 1d
 
-    # Used when retention_policy is count. Keeps the newest N matching files.
+    # Used when retention_policy is count or smart. Keeps the newest N matching files.
     retention_count: 2
+
+    # Used when retention_policy is perspective.
+    # Allowed values: hour, day, week, month, year.
+    # day keeps all backups from today, then the oldest backup per week in the current month,
+    # the oldest backup per month in the current year, and the oldest backup per older year.
+    # week keeps all backups from the current week, then monthly and yearly representatives.
+    # month keeps all backups from the current month, then monthly and yearly representatives.
+    # year keeps all backups from the current year, then one oldest backup per older year.
+    perspective_scope: day
 
     # Skip an unchanged item after it was transferred successfully.
     # Keep true when delete_on_success is false to prevent repeated uploads.

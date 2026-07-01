@@ -1,6 +1,6 @@
 {
   "name": "backup-agent",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "description": "Self-contained Windows backup agent for scheduled SSH/SFTP file transfers.",
   "main": "src/index.js",
   "bin": {

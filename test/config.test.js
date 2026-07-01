@@ -168,6 +168,68 @@ sources:
   });
 });
 
+test("smart and perspective retention policies validate", () => {
+  const sources = String.raw`
+sources:
+  defaults:
+    source_file_pattern: '*.bak'
+    retention_policy: smart
+    retention_time: 5d
+    retention_count: 30
+  items:
+    - name: smart_backups
+      source_dir: 'C:\Backups'
+    - name: perspective_backups
+      source_dir: 'C:\Archives'
+      retention_policy: perspective
+      perspective_scope: day
+`;
+
+  withTestConfig(requiredYaml(sources), (config) => {
+    assert.equal(config.sources[0].retentionPolicy, "smart");
+    assert.equal(config.sources[0].retentionTime, "5d");
+    assert.equal(config.sources[0].retentionCount, 30);
+    assert.equal(config.sources[1].retentionPolicy, "perspective");
+    assert.equal(config.sources[1].retentionPerspectiveScope, "day");
+    assert.equal(config.sources[1].retentionTimeMs, null);
+    assert.equal(config.sources[1].retentionCount, null);
+    assert.deepEqual(validateConfig(config), []);
+  });
+});
+
+test("smart retention can be inferred when both time and count are set", () => {
+  const sources = String.raw`
+sources:
+  items:
+    - name: database_backups
+      source_dir: 'C:\Backups'
+      retention_time: 5d
+      retention_count: 30
+`;
+
+  withTestConfig(requiredYaml(sources), (config) => {
+    assert.equal(config.sources[0].retentionPolicy, "smart");
+    assert.equal(config.sources[0].retentionTime, "5d");
+    assert.equal(config.sources[0].retentionCount, 30);
+    assert.deepEqual(validateConfig(config), []);
+  });
+});
+
+test("perspective retention requires a valid scope", () => {
+  const sources = String.raw`
+sources:
+  items:
+    - name: database_backups
+      source_dir: 'C:\Backups'
+      retention_policy: perspective
+`;
+
+  withTestConfig(requiredYaml(sources), (config) => {
+    const errors = validateConfig(config);
+    assert.ok(errors.includes("sources.items[0].perspective_scope must be hour, day, week, month, or year when retention_policy=perspective."));
+  });
+});
+
 test("shared proxy fields are reused by update, destination, Telegram, and email", () => {
   const content = String.raw`
 proxy:

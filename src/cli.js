@@ -63,6 +63,22 @@ function isWindows() {
   return process.platform === "win32";
 }
 
+function retentionDetail(source) {
+  if (source.retentionPolicy === "time") {
+    return `time:${source.retentionTime}`;
+  }
+  if (source.retentionPolicy === "count") {
+    return `count:${source.retentionCount}`;
+  }
+  if (source.retentionPolicy === "smart") {
+    return `smart:time=${source.retentionTime},count=${source.retentionCount}`;
+  }
+  if (source.retentionPolicy === "perspective") {
+    return `perspective:${source.retentionPerspectiveScope}`;
+  }
+  return "off";
+}
+
 function quotePowerShell(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
@@ -282,11 +298,6 @@ function health() {
   console.log(`Create destination directory: ${config.destination.createDir ? config.destination.dirFormat : "disabled"}`);
   console.log(`Sources: ${config.sources.length}`);
   for (const source of config.sources) {
-    const retentionDetail = source.retentionPolicy === "time"
-      ? `time:${source.retentionTime}`
-      : source.retentionPolicy === "count"
-        ? `count:${source.retentionCount}`
-        : "off";
     console.log(`Source: ${source.name}`);
     console.log(`  Mode: ${source.mode}`);
     console.log(`  Directory: ${source.dir}`);
@@ -296,7 +307,7 @@ function health() {
     }
     console.log(`  Min age seconds: ${source.minAgeSeconds}`);
     console.log(`  Compression: ${source.compression.enabled ? "enabled" : "disabled"}`);
-    console.log(`  Retention: ${retentionDetail}`);
+    console.log(`  Retention: ${retentionDetail(source)}`);
     console.log(`  Delete on success: ${source.deleteOnSuccess ? "true" : "false"}`);
     console.log(`  Skip already transferred: ${source.skipAlreadyTransferred ? "true" : "false"}`);
   }

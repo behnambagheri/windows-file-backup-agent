@@ -4,7 +4,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { readProgress } = require("../src/progress");
-const { listSourceFiles, listDirectorySource, runTransferCycle } = require("../src/transfer");
+const { listSourceFiles, listDirectorySource, runTransferCycle, runRetentionCleanup } = require("../src/transfer");
 
 function logger() {
   return {
@@ -30,6 +30,7 @@ function source(overrides = {}) {
     retentionTimeMs: null,
     retentionMinutes: null,
     retentionCount: null,
+    retentionPerspectiveScope: "",
     compression: {
       enabled: false,
       level: 9,
@@ -52,6 +53,10 @@ function writeFile(filePath, content, mtime = new Date(Date.now() - 60000)) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, content);
   fs.utimesSync(filePath, mtime, mtime);
+}
+
+function listNames(directory) {
+  return fs.readdirSync(directory).sort((a, b) => a.localeCompare(b));
 }
 
 test("file source lists matching files and skips already transferred fingerprints", async () => {
@@ -123,5 +128,113 @@ test("transfer cycle writes completed progress when no source items match", asyn
     assert.deepEqual(results, []);
     assert.equal(progress.status, "completed");
     assert.equal(progress.totals.items, 0);
+  });
+});
+
+test("smart retention keeps the larger set from count or time", async () => {
+  await withTempDir(async (directory) => {
+    const now = new Date("2026-07-15T12:00:00");
+    for (let index = 0; index < 40; index += 1) {
+      writeFile(
+        path.join(directory, `recent-${String(index).padStart(2, "0")}.bak`),
+        "recent",
+        new Date(now.getTime() - (index + 1) * 60 * 1000)
+      );
+    }
+    for (let index = 0; index < 20; index += 1) {
+      writeFile(
+        path.join(directory, `old-${String(index).padStart(2, "0")}.bak`),
+        "old",
+        new Date(now.getTime() - (10 * 24 * 60 * 60 * 1000) - (index + 1) * 60 * 1000)
+      );
+    }
+
+    const testSource = source({
+      dir: directory,
+      retentionPolicy: "smart",
+      retentionTime: "5d",
+      retentionTimeMs: 5 * 24 * 60 * 60 * 1000,
+      retentionMinutes: 5 * 24 * 60,
+      retentionCount: 30
+    });
+    const result = await runRetentionCleanup({ source: testSource }, logger(), new Set(), testSource, now);
+    const remaining = listNames(directory);
+
+    assert.equal(result.deleted, 20);
+    assert.equal(remaining.length, 40);
+    assert.ok(remaining.every((name) => name.startsWith("recent-")));
+  });
+
+  await withTempDir(async (directory) => {
+    const now = new Date("2026-07-15T12:00:00");
+    for (let index = 0; index < 10; index += 1) {
+      writeFile(
+        path.join(directory, `recent-${String(index).padStart(2, "0")}.bak`),
+        "recent",
+        new Date(now.getTime() - (index + 1) * 60 * 1000)
+      );
+    }
+    for (let index = 0; index < 20; index += 1) {
+      writeFile(
+        path.join(directory, `old-${String(index).padStart(2, "0")}.bak`),
+        "old",
+        new Date(now.getTime() - (10 * 24 * 60 * 60 * 1000) - (index + 1) * 60 * 1000)
+      );
+    }
+
+    const testSource = source({
+      dir: directory,
+      retentionPolicy: "smart",
+      retentionTime: "5d",
+      retentionTimeMs: 5 * 24 * 60 * 60 * 1000,
+      retentionMinutes: 5 * 24 * 60,
+      retentionCount: 20
+    });
+    const result = await runRetentionCleanup({ source: testSource }, logger(), new Set(), testSource, now);
+
+    assert.equal(result.deleted, 10);
+    assert.equal(listNames(directory).length, 20);
+  });
+});
+
+test("perspective retention keeps current scope and oldest calendar representatives", async () => {
+  await withTempDir(async (directory) => {
+    const now = new Date("2026-07-15T12:00:00");
+    const files = [
+      ["today-a.bak", "2026-07-15T10:00:00"],
+      ["today-b.bak", "2026-07-15T11:00:00"],
+      ["july-week-1-oldest.bak", "2026-07-01T01:00:00"],
+      ["july-week-1-newer.bak", "2026-07-02T01:00:00"],
+      ["july-week-2-oldest.bak", "2026-07-08T01:00:00"],
+      ["feb-oldest.bak", "2026-02-01T01:00:00"],
+      ["feb-newer.bak", "2026-02-02T01:00:00"],
+      ["march-oldest.bak", "2026-03-01T01:00:00"],
+      ["year-2024-oldest.bak", "2024-01-01T01:00:00"],
+      ["year-2024-newer.bak", "2024-06-01T01:00:00"],
+      ["year-2025-oldest.bak", "2025-01-01T01:00:00"]
+    ];
+    for (const [name, mtime] of files) {
+      writeFile(path.join(directory, name), name, new Date(mtime));
+    }
+
+    const testSource = source({
+      dir: directory,
+      retentionPolicy: "perspective",
+      retentionPerspectiveScope: "day"
+    });
+    const result = await runRetentionCleanup({ source: testSource }, logger(), new Set(), testSource, now);
+    const remaining = listNames(directory);
+
+    assert.equal(result.deleted, 3);
+    assert.deepEqual(remaining, [
+      "feb-oldest.bak",
+      "july-week-1-oldest.bak",
+      "july-week-2-oldest.bak",
+      "march-oldest.bak",
+      "today-a.bak",
+      "today-b.bak",
+      "year-2024-oldest.bak",
+      "year-2025-oldest.bak"
+    ]);
   });
 });

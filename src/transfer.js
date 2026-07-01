@@ -727,7 +727,145 @@ async function testDestination(config, logger, connect = connectSsh) {
   }
 }
 
-async function runRetentionCleanup(config, logger, protectedFingerprints = new Set(), source = config.source) {
+function pad2(value) {
+  return String(value).padStart(2, "0");
+}
+
+function dayKey(date) {
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+}
+
+function hourKey(date) {
+  return `${dayKey(date)}T${pad2(date.getHours())}`;
+}
+
+function monthKey(date) {
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`;
+}
+
+function yearKey(date) {
+  return String(date.getFullYear());
+}
+
+function weekKey(date) {
+  const localDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const day = localDate.getDay() || 7;
+  localDate.setDate(localDate.getDate() - day + 1);
+  return dayKey(localDate);
+}
+
+function sameHour(left, right) {
+  return hourKey(left) === hourKey(right);
+}
+
+function sameDay(left, right) {
+  return dayKey(left) === dayKey(right);
+}
+
+function sameWeek(left, right) {
+  return weekKey(left) === weekKey(right);
+}
+
+function sameMonth(left, right) {
+  return monthKey(left) === monthKey(right);
+}
+
+function sameYear(left, right) {
+  return yearKey(left) === yearKey(right);
+}
+
+function candidateDate(candidate) {
+  return new Date(candidate.stats.mtimeMs);
+}
+
+function addAllToKeep(keep, candidates, predicate) {
+  for (const candidate of candidates) {
+    if (predicate(candidate)) {
+      keep.add(candidate.fingerprint);
+    }
+  }
+}
+
+function olderCandidate(left, right) {
+  if (!right) {
+    return true;
+  }
+  if (left.stats.mtimeMs !== right.stats.mtimeMs) {
+    return left.stats.mtimeMs < right.stats.mtimeMs;
+  }
+  return left.name.localeCompare(right.name) < 0;
+}
+
+function addOldestPerBucket(keep, candidates, predicate, bucketKey) {
+  const buckets = new Map();
+  for (const candidate of candidates) {
+    if (!predicate(candidate)) {
+      continue;
+    }
+    const date = candidateDate(candidate);
+    const key = bucketKey(date);
+    const current = buckets.get(key);
+    if (olderCandidate(candidate, current)) {
+      buckets.set(key, candidate);
+    }
+  }
+  for (const candidate of buckets.values()) {
+    keep.add(candidate.fingerprint);
+  }
+}
+
+function smartRetentionDeleteCandidates(candidates, source, nowMs) {
+  const keep = new Set();
+  const cutoffMs = nowMs - source.retentionTimeMs;
+  const newest = [...candidates].sort((a, b) => b.stats.mtimeMs - a.stats.mtimeMs);
+
+  for (const candidate of candidates) {
+    if (candidate.stats.mtimeMs >= cutoffMs) {
+      keep.add(candidate.fingerprint);
+    }
+  }
+  for (const candidate of newest.slice(0, source.retentionCount)) {
+    keep.add(candidate.fingerprint);
+  }
+  return candidates.filter((candidate) => !keep.has(candidate.fingerprint));
+}
+
+function perspectiveRetentionDeleteCandidates(candidates, scope, nowDate) {
+  const keep = new Set();
+  const isCurrentHour = (candidate) => sameHour(candidateDate(candidate), nowDate);
+  const isCurrentDay = (candidate) => sameDay(candidateDate(candidate), nowDate);
+  const isCurrentWeek = (candidate) => sameWeek(candidateDate(candidate), nowDate);
+  const isCurrentMonth = (candidate) => sameMonth(candidateDate(candidate), nowDate);
+  const isCurrentYear = (candidate) => sameYear(candidateDate(candidate), nowDate);
+
+  if (scope === "hour") {
+    addAllToKeep(keep, candidates, isCurrentHour);
+    addOldestPerBucket(keep, candidates, (candidate) => isCurrentDay(candidate) && !isCurrentHour(candidate), hourKey);
+    addOldestPerBucket(keep, candidates, (candidate) => isCurrentMonth(candidate) && !isCurrentDay(candidate), weekKey);
+    addOldestPerBucket(keep, candidates, (candidate) => isCurrentYear(candidate) && !isCurrentMonth(candidate), monthKey);
+    addOldestPerBucket(keep, candidates, (candidate) => !isCurrentYear(candidate), yearKey);
+  } else if (scope === "day") {
+    addAllToKeep(keep, candidates, isCurrentDay);
+    addOldestPerBucket(keep, candidates, (candidate) => isCurrentMonth(candidate) && !isCurrentDay(candidate), weekKey);
+    addOldestPerBucket(keep, candidates, (candidate) => isCurrentYear(candidate) && !isCurrentMonth(candidate), monthKey);
+    addOldestPerBucket(keep, candidates, (candidate) => !isCurrentYear(candidate), yearKey);
+  } else if (scope === "week") {
+    addAllToKeep(keep, candidates, isCurrentWeek);
+    addOldestPerBucket(keep, candidates, (candidate) => isCurrentYear(candidate) && !isCurrentWeek(candidate), monthKey);
+    addOldestPerBucket(keep, candidates, (candidate) => !isCurrentYear(candidate) && !isCurrentWeek(candidate), yearKey);
+  } else if (scope === "month") {
+    addAllToKeep(keep, candidates, isCurrentMonth);
+    addOldestPerBucket(keep, candidates, (candidate) => isCurrentYear(candidate) && !isCurrentMonth(candidate), monthKey);
+    addOldestPerBucket(keep, candidates, (candidate) => !isCurrentYear(candidate), yearKey);
+  } else if (scope === "year") {
+    addAllToKeep(keep, candidates, isCurrentYear);
+    addOldestPerBucket(keep, candidates, (candidate) => !isCurrentYear(candidate), yearKey);
+  }
+
+  return candidates.filter((candidate) => !keep.has(candidate.fingerprint));
+}
+
+async function runRetentionCleanup(config, logger, protectedFingerprints = new Set(), source = config.source, now = new Date()) {
   if (source.retentionPolicy === "off") {
     return { deleted: 0, failed: 0 };
   }
@@ -776,12 +914,18 @@ async function runRetentionCleanup(config, logger, protectedFingerprints = new S
   }
 
   let deleteCandidates = [];
+  const nowDate = now instanceof Date ? now : new Date(now);
+  const nowMs = nowDate.getTime();
   if (source.retentionPolicy === "time") {
-    const cutoffMs = Date.now() - source.retentionTimeMs;
+    const cutoffMs = nowMs - source.retentionTimeMs;
     deleteCandidates = candidates.filter((candidate) => candidate.stats.mtimeMs < cutoffMs);
   } else if (source.retentionPolicy === "count") {
     const sorted = [...candidates].sort((a, b) => b.stats.mtimeMs - a.stats.mtimeMs);
     deleteCandidates = sorted.slice(source.retentionCount);
+  } else if (source.retentionPolicy === "smart") {
+    deleteCandidates = smartRetentionDeleteCandidates(candidates, source, nowMs);
+  } else if (source.retentionPolicy === "perspective") {
+    deleteCandidates = perspectiveRetentionDeleteCandidates(candidates, source.retentionPerspectiveScope, nowDate);
   }
 
   for (const candidate of deleteCandidates) {
@@ -800,10 +944,11 @@ async function runRetentionCleanup(config, logger, protectedFingerprints = new S
       logger.info("Retention cleanup deleted source file", {
         source: sourceLabel(source),
         file: candidate.path,
-        ageMinutes: Math.floor((Date.now() - stats.mtimeMs) / 60000),
+        ageMinutes: Math.floor((nowMs - stats.mtimeMs) / 60000),
         retentionPolicy: source.retentionPolicy,
-        retentionTime: source.retentionPolicy === "time" ? source.retentionTime : undefined,
-        retentionCount: source.retentionPolicy === "count" ? source.retentionCount : undefined
+        retentionTime: ["time", "smart"].includes(source.retentionPolicy) ? source.retentionTime : undefined,
+        retentionCount: ["count", "smart"].includes(source.retentionPolicy) ? source.retentionCount : undefined,
+        perspectiveScope: source.retentionPolicy === "perspective" ? source.retentionPerspectiveScope : undefined
       });
     } catch (error) {
       failed += 1;
@@ -821,6 +966,9 @@ async function runRetentionCleanup(config, logger, protectedFingerprints = new S
       deleted,
       failed,
       retentionPolicy: source.retentionPolicy,
+      retentionTime: ["time", "smart"].includes(source.retentionPolicy) ? source.retentionTime : undefined,
+      retentionCount: ["count", "smart"].includes(source.retentionPolicy) ? source.retentionCount : undefined,
+      perspectiveScope: source.retentionPolicy === "perspective" ? source.retentionPerspectiveScope : undefined,
       matchingFiles: candidates.length
     });
   }
