@@ -124,7 +124,11 @@ schedule:
   cron: '0 */5 * * * *'
 
 proxy:
-  url: 'socks5://127.0.0.1:1080'
+  protocol: socks5
+  host: 127.0.0.1
+  port: 1080
+  username: ''
+  password: ''
 
 destination:
   host: '192.0.2.10'
@@ -274,8 +278,14 @@ Define the shared SOCKS proxy once:
 
 ```yaml
 proxy:
-  url: 'socks5://127.0.0.1:1080'
+  protocol: socks5
+  host: 127.0.0.1
+  port: 1080
+  username: ''
+  password: ''
 ```
+
+`protocol` can be `socks4`, `socks4a`, `socks5`, or `socks5h`. `username` and `password` are optional; leave both empty for proxies without authentication.
 
 Then enable it only where needed:
 
@@ -340,6 +350,9 @@ notifications:
   telegram:
     mode: failures
     fallback: email
+    timeout_ms: 60000
+    retry_count: 2
+    retry_delay_ms: 3000
     bot_token: ''
     chat_id: ''
     topic_id: ''
@@ -356,7 +369,9 @@ notifications:
 
 When an enabled channel fails, backup-agent tries its configured fallback even if the fallback channel's normal mode is `off`. The fallback channel must still have valid credentials. Failures never recurse between Telegram and email.
 
-Success and failure messages include source host, source IP addresses, configured source name, source file or directory path, compression status, original/upload size, destination host/IP, destination remote path, error message when failed, and event time.
+Telegram requests use `timeout_ms` and retry transient network failures, including slow or unstable proxy/TLS setup errors. `retry_count: 2` means one initial request plus two retries.
+
+Success and failure messages include source host, source IP addresses, configured source name, source file or directory path, compression status, human-readable original/upload size, destination host, destination remote path, error message when failed, and event time.
 
 ## Update
 

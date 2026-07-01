@@ -1,5 +1,4 @@
 const os = require("os");
-const dns = require("dns").promises;
 const axios = require("axios");
 const nodemailer = require("nodemailer");
 const socks = require("socks");
@@ -34,17 +33,34 @@ function sourceIps() {
   return ips;
 }
 
-async function resolveDestinationIp(host) {
-  try {
-    const result = await dns.lookup(host);
-    return result.address;
-  } catch {
-    return host;
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableTelegramError(error) {
+  if (!error.response) {
+    return true;
   }
+  const status = error.response.status;
+  return status === 408 || status === 429 || status >= 500;
+}
+
+function formatBytes(value) {
+  const bytes = Number.isFinite(value) && value > 0 ? value : 0;
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let amount = bytes;
+  let unitIndex = 0;
+  while (amount >= 1024 && unitIndex < units.length - 1) {
+    amount /= 1024;
+    unitIndex += 1;
+  }
+  const precision = unitIndex === 0 || amount >= 100 ? 0 : amount >= 10 ? 1 : 2;
+  return `${amount.toFixed(precision)} ${units[unitIndex]}`;
 }
 
 async function buildEvent(config, result) {
-  const destinationIp = await resolveDestinationIp(config.destination.host);
+  const originalSize = result.file ? result.file.size : 0;
+  const uploadSize = result.uploadSize || originalSize;
   return {
     success: result.success,
     eventTime: new Date().toISOString(),
@@ -54,21 +70,19 @@ async function buildEvent(config, result) {
     sourceFileName: result.file ? result.file.name : "",
     sourceFilePath: result.file ? result.file.path : "",
     destinationHost: config.destination.host,
-    destinationIp,
     destinationPath: result.remotePath || config.destination.remoteDir,
     compressed: !!result.compressed,
     compressionFormat: result.compressionFormat || "",
-    originalSize: result.file ? result.file.size : 0,
-    uploadSize: result.uploadSize || (result.file ? result.file.size : 0),
+    originalSize,
+    uploadSize,
+    originalSizeText: formatBytes(originalSize),
+    uploadSizeText: formatBytes(uploadSize),
     error: result.error ? String(result.error.stack || result.error.message || result.error) : ""
   };
 }
 
 async function buildNotificationTestEvent(config, channel) {
   const destinationHost = config.destination.host || "not configured";
-  const destinationIp = config.destination.host
-    ? await resolveDestinationIp(config.destination.host)
-    : "not configured";
   return {
     success: true,
     test: true,
@@ -81,12 +95,13 @@ async function buildNotificationTestEvent(config, channel) {
     sourceFileName: "not applicable",
     sourceFilePath: "not applicable",
     destinationHost,
-    destinationIp,
     destinationPath: config.destination.remoteDir || "not configured",
     compressed: false,
     compressionFormat: "",
     originalSize: 0,
     uploadSize: 0,
+    originalSizeText: formatBytes(0),
+    uploadSizeText: formatBytes(0),
     error: ""
   };
 }
@@ -110,10 +125,10 @@ function telegramMessage(event) {
     `<b>Source file:</b> ${htmlEscape(event.sourceFileName || "none")}`,
     `<b>Source path:</b> <code>${htmlEscape(event.sourceFilePath || "none")}</code>`,
     `<b>Compression:</b> ${event.compressed ? `enabled (${htmlEscape(event.compressionFormat)})` : "disabled"}`,
-    `<b>Original size:</b> ${htmlEscape(event.originalSize)} bytes`,
-    `<b>Upload size:</b> ${htmlEscape(event.uploadSize)} bytes`,
+    `<b>Original size:</b> ${htmlEscape(event.originalSizeText)}`,
+    `<b>Upload size:</b> ${htmlEscape(event.uploadSizeText)}`,
     "",
-    `<b>Destination IP:</b> ${htmlEscape(event.destinationIp)}`,
+    `<b>Destination host:</b> ${htmlEscape(event.destinationHost)}`,
     `<b>Destination path:</b> <code>${htmlEscape(event.destinationPath || "none")}</code>`,
     `<b>Event time:</b> ${htmlEscape(event.eventTime)}`
   ];
@@ -142,11 +157,10 @@ function emailText(event) {
     `Source file: ${event.sourceFileName || "none"}`,
     `Source path: ${event.sourceFilePath || "none"}`,
     `Compression: ${event.compressed ? `enabled (${event.compressionFormat})` : "disabled"}`,
-    `Original size: ${event.originalSize} bytes`,
-    `Upload size: ${event.uploadSize} bytes`,
+    `Original size: ${event.originalSizeText}`,
+    `Upload size: ${event.uploadSizeText}`,
     "",
     `Destination host: ${event.destinationHost}`,
-    `Destination IP: ${event.destinationIp}`,
     `Destination path: ${event.destinationPath || "none"}`,
     event.success ? "" : `Error: ${event.error || "unknown error"}`,
     `Event time: ${event.eventTime}`
@@ -167,10 +181,9 @@ function emailHtml(event) {
     ["Source file", event.sourceFileName || "none"],
     ["Source path", event.sourceFilePath || "none"],
     ["Compression", event.compressed ? `enabled (${event.compressionFormat})` : "disabled"],
-    ["Original size", `${event.originalSize} bytes`],
-    ["Upload size", `${event.uploadSize} bytes`],
+    ["Original size", event.originalSizeText],
+    ["Upload size", event.uploadSizeText],
     ["Destination host", event.destinationHost],
-    ["Destination IP", event.destinationIp],
     ["Destination path", event.destinationPath || "none"],
     ...(event.success ? [] : [["Error", event.error || "unknown error"]]),
     ["Event time", event.eventTime]
@@ -204,7 +217,7 @@ async function sendTelegram(config, event, logger, force = false) {
     body.message_thread_id = config.telegram.topicId;
   }
 
-  const requestConfig = { timeout: 30000 };
+  const requestConfig = { timeout: config.telegram.timeoutMs };
   if (config.telegram.useProxy && config.telegram.proxy) {
     const agent = new SocksProxyAgent(config.telegram.proxy);
     requestConfig.httpAgent = agent;
@@ -212,8 +225,32 @@ async function sendTelegram(config, event, logger, force = false) {
     requestConfig.proxy = false;
   }
 
-  await axios.post(url, body, requestConfig);
-  logger.info("Telegram notification sent", { mode: config.telegram.mode, success: event.success });
+  const retryCount = Math.max(0, config.telegram.retryCount || 0);
+  const retryDelayMs = Math.max(0, config.telegram.retryDelayMs || 0);
+  for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+    try {
+      await axios.post(url, body, requestConfig);
+      logger.info("Telegram notification sent", {
+        mode: config.telegram.mode,
+        success: event.success,
+        attempt: attempt + 1
+      });
+      return;
+    } catch (error) {
+      if (attempt >= retryCount || !isRetryableTelegramError(error)) {
+        throw error;
+      }
+      logger.warn("Telegram notification retry scheduled", {
+        attempt: attempt + 1,
+        nextAttempt: attempt + 2,
+        retryDelayMs,
+        error: error.message
+      });
+      if (retryDelayMs > 0) {
+        await sleep(retryDelayMs);
+      }
+    }
+  }
 }
 
 async function sendEmail(config, event, logger, force = false) {

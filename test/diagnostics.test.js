@@ -26,7 +26,10 @@ function config() {
       proxy: "",
       token: "test-token",
       chatId: "1234",
-      topicId: "55"
+      topicId: "55",
+      timeoutMs: 60000,
+      retryCount: 0,
+      retryDelayMs: 0
     },
     email: {
       mode: "off",
@@ -72,8 +75,36 @@ test("Telegram diagnostic sends a real test message when mode is off", async () 
   assert.equal(request[0], "https://telegram.example/bottest-token/sendMessage");
   assert.equal(request[1].chat_id, "1234");
   assert.equal(request[1].message_thread_id, "55");
+  assert.equal(request[2].timeout, 60000);
   assert.match(request[1].text, /Telegram notification test SUCCESS/);
   assert.match(request[1].text, /No backup file was transferred/);
+});
+
+test("Telegram diagnostic retries transient network failures", async () => {
+  const originalPost = axios.post;
+  const testConfig = config();
+  testConfig.telegram.timeoutMs = 90000;
+  testConfig.telegram.retryCount = 1;
+  testConfig.telegram.retryDelayMs = 0;
+  let attempts = 0;
+  let requestConfig;
+  axios.post = async (url, body, options) => {
+    attempts += 1;
+    requestConfig = options;
+    if (attempts === 1) {
+      throw new Error("Client network socket disconnected before secure TLS connection was established");
+    }
+    return { status: 200 };
+  };
+
+  try {
+    await testTelegram(testConfig, logger());
+  } finally {
+    axios.post = originalPost;
+  }
+
+  assert.equal(attempts, 2);
+  assert.equal(requestConfig.timeout, 90000);
 });
 
 test("Email diagnostic sends a real test message when mode is off", async () => {
@@ -231,6 +262,55 @@ test("Fallback does not duplicate a target channel that already succeeded", asyn
   }
 
   assert.equal(emailCount, 1);
+});
+
+test("Notifications omit destination IP and render sizes as human-readable values", async () => {
+  const originalPost = axios.post;
+  const originalCreateTransport = nodemailer.createTransport;
+  const testConfig = config();
+  testConfig.telegram.mode = "all";
+  testConfig.email.mode = "all";
+  let telegramBody;
+  let message;
+
+  axios.post = async (url, body) => {
+    telegramBody = body;
+    return { status: 200 };
+  };
+  nodemailer.createTransport = () => ({
+    sendMail: async (mail) => {
+      message = mail;
+    }
+  });
+
+  try {
+    await notify(testConfig, {
+      success: true,
+      sourceName: "database_backups",
+      remotePath: "/backups/db.bak.gz",
+      compressed: true,
+      compressionFormat: "gzip",
+      uploadSize: 1024,
+      file: {
+        name: "db.bak",
+        path: "C:\\Backups\\db.bak",
+        size: 5 * 1024 * 1024
+      }
+    }, logger());
+  } finally {
+    axios.post = originalPost;
+    nodemailer.createTransport = originalCreateTransport;
+  }
+
+  assert.doesNotMatch(telegramBody.text, /Destination IP/);
+  assert.doesNotMatch(message.text, /Destination IP/);
+  assert.doesNotMatch(message.html, /Destination IP/);
+  assert.match(telegramBody.text, /Original size:<\/b> 5\.00 MiB/);
+  assert.match(telegramBody.text, /Upload size:<\/b> 1\.00 KiB/);
+  assert.match(message.text, /Original size: 5\.00 MiB/);
+  assert.match(message.text, /Upload size: 1\.00 KiB/);
+  assert.match(message.html, /5\.00 MiB/);
+  assert.match(message.html, /1\.00 KiB/);
 });
 
 test("Destination diagnostic writes, verifies, and removes its remote marker", async () => {

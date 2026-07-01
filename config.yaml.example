@@ -38,16 +38,26 @@ schedule:
   run_once: false
 
 proxy:
-  # Shared SOCKS proxy URL. It is used only by sections where use_proxy is true.
-  # Formats: socks5://host:port or socks5://username:password@host:port.
-  url: 'socks5://127.0.0.1:1080'
+  # Shared SOCKS proxy settings. It is used only by sections where use_proxy is true.
+  # protocol allowed values: socks4, socks4a, socks5, socks5h.
+  protocol: socks5
+
+  # Proxy server hostname or IP address. Leave empty when no proxy is needed.
+  host: 127.0.0.1
+
+  # Proxy TCP port. Allowed range: 1-65535.
+  port: 1080
+
+  # Optional proxy authentication. Leave both empty when the proxy has no login.
+  username: ''
+  password: ''
 
 update:
   # Zip package downloaded by `backup-agent update`.
   # The default always resolves to the newest GitHub release asset.
   url: 'https://github.com/behnambagheri/windows-file-backup-agent/releases/latest/download/backup-agent-windows.zip'
 
-  # Route update package downloads through proxy.url.
+  # Route update package downloads through the shared proxy settings.
   use_proxy: false
 
 metrics:
@@ -110,7 +120,7 @@ destination:
   # SSH keepalive interval in milliseconds. 20000 means 20 seconds.
   keepalive_interval_ms: 20000
 
-  # Route destination SSH/SFTP transfers through proxy.url.
+  # Route destination SSH/SFTP transfers through the shared proxy settings.
   use_proxy: false
 
 sources:
@@ -183,7 +193,16 @@ notifications:
     # Telegram Bot API base URL. Keep the default unless using a compatible API gateway.
     api_url: 'https://api.telegram.org'
 
-    # Route Telegram API requests through proxy.url.
+    # Request timeout for Telegram API calls. Increase this when using a slow proxy.
+    timeout_ms: 60000
+
+    # Retry transient Telegram network failures. 2 means one initial try plus 2 retries.
+    retry_count: 2
+
+    # Delay between Telegram retries in milliseconds.
+    retry_delay_ms: 3000
+
+    # Route Telegram API requests through the shared proxy settings.
     use_proxy: false
 
     # Telegram bot token from BotFather.
@@ -203,7 +222,7 @@ notifications:
     # Telegram settings must be valid when this is set to telegram.
     fallback: off
 
-    # Route SMTP delivery through proxy.url.
+    # Route SMTP delivery through the shared proxy settings.
     use_proxy: false
 
     # SMTP server hostname or IP address.

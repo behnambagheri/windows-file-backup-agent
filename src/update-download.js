@@ -21,7 +21,7 @@ async function main() {
     throw new Error("BACKUP_AGENT_UPDATE_OUTPUT is required.");
   }
   if (useProxy && !proxyUrl) {
-    throw new Error("PROXY_URL is required when UPDATE_USE_PROXY=true.");
+    throw new Error("BACKUP_AGENT_PROXY_URL is required when BACKUP_AGENT_UPDATE_USE_PROXY=true.");
   }
 
   const requestConfig = {

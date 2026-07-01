@@ -12,8 +12,6 @@ const isolatedEnvironmentKeys = [
   "AGENT_HOME",
   "RUN_ONCE",
   "RUN_ON_START",
-  "PROXY_URL",
-  "GLOBAL_PROXY_URL",
   "UPDATE_URL",
   "UPDATE_USE_PROXY",
   "UPDATE_DOWNLOAD_USE_PROXY",
@@ -170,10 +168,14 @@ sources:
   });
 });
 
-test("shared proxy URL is reused by update, destination, Telegram, and email", () => {
+test("shared proxy fields are reused by update, destination, Telegram, and email", () => {
   const content = String.raw`
 proxy:
-  url: 'socks5://proxy.example:1080'
+  protocol: socks5
+  host: proxy.example
+  port: 1080
+  username: proxy-user
+  password: proxy-secret
 update:
   use_proxy: on
 destination:
@@ -204,20 +206,52 @@ notifications:
 `;
 
   withTestConfig(content, (config) => {
-    assert.equal(config.proxy.url, "socks5://proxy.example:1080");
+    assert.equal(config.proxy.protocol, "socks5");
+    assert.equal(config.proxy.host, "proxy.example");
+    assert.equal(config.proxy.port, 1080);
+    assert.equal(config.proxy.username, "proxy-user");
+    assert.equal(config.proxy.password, "proxy-secret");
+    assert.equal(config.proxy.url, "socks5://proxy-user:proxy-secret@proxy.example:1080");
     assert.equal(config.update.useProxy, true);
-    assert.equal(config.update.proxy, "socks5://proxy.example:1080");
+    assert.equal(config.update.proxy, "socks5://proxy-user:proxy-secret@proxy.example:1080");
     assert.equal(config.destination.socks5Enabled, true);
-    assert.equal(config.destination.socks5Proxy, "socks5://proxy.example:1080");
+    assert.equal(config.destination.socks5Proxy, "socks5://proxy-user:proxy-secret@proxy.example:1080");
     assert.equal(config.telegram.useProxy, true);
-    assert.equal(config.telegram.proxy, "socks5://proxy.example:1080");
+    assert.equal(config.telegram.proxy, "socks5://proxy-user:proxy-secret@proxy.example:1080");
     assert.equal(config.email.useProxy, true);
-    assert.equal(config.email.proxy, "socks5://proxy.example:1080");
+    assert.equal(config.email.proxy, "socks5://proxy-user:proxy-secret@proxy.example:1080");
     assert.deepEqual(validateConfig(config), []);
   });
 });
 
-test("enabled destination proxy requires a shared proxy URL", () => {
+test("shared proxy username and password are optional", () => {
+  const content = String.raw`
+proxy:
+  protocol: socks5
+  host: proxy.example
+  port: 1080
+destination:
+  host: '192.0.2.10'
+  port: 22
+  user: backup-user
+  remote_dir: /backups
+  auth_method: password
+  password: secret
+  use_proxy: true
+sources:
+  items:
+    - name: database_backups
+      source_dir: 'C:\Backups'
+`;
+
+  withTestConfig(content, (config) => {
+    assert.equal(config.proxy.url, "socks5://proxy.example:1080");
+    assert.equal(config.destination.socks5Proxy, "socks5://proxy.example:1080");
+    assert.deepEqual(validateConfig(config), []);
+  });
+});
+
+test("enabled destination proxy requires shared proxy host", () => {
   const content = String.raw`
 destination:
   host: '192.0.2.10'
@@ -235,7 +269,7 @@ sources:
 
   withTestConfig(content, (config) => {
     const errors = validateConfig(config);
-    assert.ok(errors.includes("PROXY_URL is required when destination.use_proxy=true."));
+    assert.ok(errors.includes("proxy.host is required when destination.use_proxy=true."));
   });
 });
 

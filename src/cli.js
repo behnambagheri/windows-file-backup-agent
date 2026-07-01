@@ -303,6 +303,7 @@ function health() {
   console.log(`Metrics: ${config.metrics.enabled ? `${config.metrics.host}:${config.metrics.port}${config.metrics.path}` : "disabled"}`);
   console.log(`Metrics firewall rule: ${config.metrics.firewallRule ? "enabled" : "disabled"}`);
   console.log(`Telegram notifications: ${config.telegram.mode} (fallback: ${config.telegram.fallback})`);
+  console.log(`Telegram timeout/retry: ${config.telegram.timeoutMs}ms, ${config.telegram.retryCount} retries, ${config.telegram.retryDelayMs}ms delay`);
   console.log(`Email notifications: ${config.email.mode} (fallback: ${config.email.fallback})`);
   console.log(`Update URL: ${config.update.url}`);
 
@@ -594,7 +595,7 @@ function updateAgent() {
     process.exit(1);
   }
   if (config.update.useProxy && !config.update.proxy) {
-    console.error("proxy.url is required when update.use_proxy=true.");
+    console.error("proxy.host is required when update.use_proxy=true.");
     process.exit(1);
   }
 

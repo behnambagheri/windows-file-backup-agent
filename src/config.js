@@ -247,9 +247,32 @@ function compressionConfig(primary, fallback, stateDir, safeName) {
   };
 }
 
-function proxyUrl(root, names = []) {
-  const proxy = root.proxy || {};
-  return stringValue(setting(proxy, root, ["url", "PROXY_URL", "GLOBAL_PROXY_URL", ...names, "SOCKS5_PROXY"]));
+function encodedProxyCredentials(username, password) {
+  if (!username) {
+    return "";
+  }
+  const encodedUser = encodeURIComponent(username);
+  const encodedPassword = password ? `:${encodeURIComponent(password)}` : "";
+  return `${encodedUser}${encodedPassword}@`;
+}
+
+function proxyConfig(proxy) {
+  const protocol = stringValue(setting(proxy, {}, ["protocol", "type"], "socks5")).toLowerCase().replace(/:$/, "");
+  const host = stringValue(setting(proxy, {}, ["host", "hostname"], ""));
+  const port = intValue(setting(proxy, {}, ["port"], 1080), 1080);
+  const username = stringValue(setting(proxy, {}, ["username", "user"], ""));
+  const password = stringValue(setting(proxy, {}, ["password", "pass"], ""));
+  const url = host
+    ? `${protocol}://${encodedProxyCredentials(username, password)}${host}:${port}`
+    : "";
+  return {
+    protocol,
+    host,
+    port,
+    username,
+    password,
+    url
+  };
 }
 
 function sourceItems(root) {
@@ -318,6 +341,7 @@ function loadConfig() {
   const telegram = notifications.telegram || root.telegram || {};
   const email = notifications.email || root.email || {};
   const proxy = root.proxy || {};
+  const sharedProxy = proxyConfig(proxy);
 
   const logsDir = path.resolve(stringValue(setting(logging, app, ["dir", "log_dir", "LOG_DIR"], path.join(directory, "logs"))));
   const stateDir = path.resolve(stringValue(setting(root.state || {}, app, ["dir", "state_dir", "STATE_DIR"], path.join(directory, "state"))));
@@ -355,9 +379,7 @@ function loadConfig() {
       firewallRule: boolValue(setting(metrics, root, ["firewall_rule", "METRICS_FIREWALL_RULE"], false), false),
       firewallRuleName: stringValue(setting(metrics, root, ["firewall_rule_name", "METRICS_FIREWALL_RULE_NAME"], "backup-agent metrics"))
     },
-    proxy: {
-      url: proxyUrl(root)
-    },
+    proxy: sharedProxy,
     destination: {
       host: stringValue(setting(destination, root, ["host", "address", "DEST_HOST", "DESTINATION_ADDRESS", "DESTINATION_HOST"])),
       port: intValue(setting(destination, root, ["port", "DEST_PORT", "DESTINATION_PORT"], 22), 22),
@@ -378,24 +400,27 @@ function loadConfig() {
         "DEST_SOCKS5_ENABLED",
         "USE_SSH_SOCKS5_PROXY"
       ], false), false),
-      socks5Proxy: proxyUrl(root, ["DESTINATION_PROXY", "DEST_PROXY", "SSH_SOCKS5_PROXY", "DEST_SOCKS5_PROXY"]),
+      socks5Proxy: sharedProxy.url,
       createDir: boolValue(setting(destination, root, ["create_dir", "CREATE_DESTINATION_DIR"], false), false),
       dirFormat: stringValue(setting(destination, root, ["dir_format", "DESTINATION_DIR_FORMAT"], "date")).toLowerCase()
     },
     update: {
       url: stringValue(setting(update, root, ["url", "UPDATE_URL"], DEFAULT_UPDATE_URL)),
       useProxy: boolValue(setting(update, root, ["use_proxy", "UPDATE_USE_PROXY", "UPDATE_DOWNLOAD_USE_PROXY"], false), false),
-      proxy: proxyUrl(root, ["UPDATE_PROXY", "UPDATE_DOWNLOAD_PROXY"])
+      proxy: sharedProxy.url
     },
     telegram: {
       mode: modeValue(setting(telegram, root, ["mode", "TELEGRAM_MODE", "TELEGRAM_SEND_MODE"], setting(telegram, root, ["enabled", "TELEGRAM_ENABLED"], "") !== "" ? "all" : "off")),
       fallback: stringValue(setting(telegram, root, ["fallback", "TELEGRAM_FALLBACK"], "off")).toLowerCase(),
       apiUrl: stringValue(setting(telegram, root, ["api_url", "TELEGRAM_API_URL"], "https://api.telegram.org")),
       useProxy: boolValue(setting(telegram, root, ["use_proxy", "TELEGRAM_USE_PROXY"], false), false),
-      proxy: proxyUrl(root, ["TELEGRAM_PROXY"]),
+      proxy: sharedProxy.url,
       token: stringValue(setting(telegram, root, ["bot_token", "token", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN"])),
       chatId: stringValue(setting(telegram, root, ["chat_id", "TELEGRAM_CHAT_ID"])),
-      topicId: stringValue(setting(telegram, root, ["topic_id", "message_thread_id", "TELEGRAM_TOPIC_ID", "TELEGRAM_MESSAGE_THREAD_ID"]))
+      topicId: stringValue(setting(telegram, root, ["topic_id", "message_thread_id", "TELEGRAM_TOPIC_ID", "TELEGRAM_MESSAGE_THREAD_ID"])),
+      timeoutMs: intValue(setting(telegram, root, ["timeout_ms", "TELEGRAM_TIMEOUT_MS"], 60000), 60000),
+      retryCount: intValue(setting(telegram, root, ["retry_count", "TELEGRAM_RETRY_COUNT"], 2), 2),
+      retryDelayMs: intValue(setting(telegram, root, ["retry_delay_ms", "TELEGRAM_RETRY_DELAY_MS"], 3000), 3000)
     },
     email: {
       mode: modeValue(setting(email, root, ["mode", "EMAIL_MODE", "EMAIL_SEND_MODE"], setting(email, root, ["enabled", "EMAIL_ENABLED"], "") !== "" ? "all" : "off")),
@@ -410,7 +435,7 @@ function loadConfig() {
       cc: parseEmailList(setting(email, root, ["cc", "EMAIL_CC"])),
       bcc: parseEmailList(setting(email, root, ["bcc", "EMAIL_BCC"])),
       useProxy: boolValue(setting(email, root, ["use_proxy", "EMAIL_USE_PROXY", "SMTP_USE_PROXY"], false), false),
-      proxy: proxyUrl(root, ["EMAIL_PROXY", "SMTP_PROXY"]),
+      proxy: sharedProxy.url,
       subjectPrefix: stringValue(setting(email, root, ["subject_prefix", "EMAIL_SUBJECT_PREFIX"], "[backup-agent]"))
     }
   };
@@ -418,23 +443,19 @@ function loadConfig() {
   return config;
 }
 
-function validateSocksProxyUrl(value) {
+function validateSocksProxyConfig(proxy) {
   const errors = [];
-  let parsed;
-  try {
-    parsed = new URL(value);
-  } catch {
-    return ["PROXY_URL must be a SOCKS proxy URL such as socks5://127.0.0.1:1080."];
+  if (!["socks4", "socks4a", "socks5", "socks5h"].includes(proxy.protocol)) {
+    errors.push("proxy.protocol must be socks4, socks4a, socks5, or socks5h.");
   }
-
-  if (!["socks4:", "socks4a:", "socks5:", "socks5h:"].includes(parsed.protocol)) {
-    errors.push("PROXY_URL must use socks4://, socks4a://, socks5://, or socks5h://.");
+  if (!proxy.host) {
+    errors.push("proxy.host is required when proxy is used.");
   }
-  if (!parsed.hostname) {
-    errors.push("PROXY_URL must include a proxy host.");
+  if (!Number.isInteger(proxy.port) || proxy.port < 1 || proxy.port > 65535) {
+    errors.push("proxy.port must be from 1 to 65535.");
   }
-  if (parsed.port && (!Number.isInteger(Number.parseInt(parsed.port, 10)) || Number.parseInt(parsed.port, 10) < 1 || Number.parseInt(parsed.port, 10) > 65535)) {
-    errors.push("PROXY_URL proxy port must be from 1 to 65535.");
+  if (proxy.password && !proxy.username) {
+    errors.push("proxy.username is required when proxy.password is set.");
   }
   return errors;
 }
@@ -443,10 +464,10 @@ function validateProxyRequirement(enabled, proxy, enabledName) {
   if (!enabled) {
     return [];
   }
-  if (!proxy) {
-    return [`PROXY_URL is required when ${enabledName}=true.`];
+  if (!proxy || !proxy.host) {
+    return [`proxy.host is required when ${enabledName}=true.`];
   }
-  return validateSocksProxyUrl(proxy);
+  return validateSocksProxyConfig(proxy);
 }
 
 function validateSourceConfig(source, index) {
@@ -494,7 +515,7 @@ function validateDestinationConfig(config) {
   }
   errors.push(...validateProxyRequirement(
     config.destination.socks5Enabled,
-    config.destination.socks5Proxy,
+    config.proxy,
     "destination.use_proxy"
   ));
   if (config.destination.createDir && !["date", "hostname", "hostname+date"].includes(config.destination.dirFormat)) {
@@ -507,7 +528,16 @@ function validateTelegramConfig(config) {
   const errors = [];
   if (!config.telegram.token) errors.push("notifications.telegram.bot_token is required.");
   if (!config.telegram.chatId) errors.push("notifications.telegram.chat_id is required.");
-  errors.push(...validateProxyRequirement(config.telegram.useProxy, config.telegram.proxy, "notifications.telegram.use_proxy"));
+  if (!Number.isInteger(config.telegram.timeoutMs) || config.telegram.timeoutMs < 1000) {
+    errors.push("notifications.telegram.timeout_ms must be at least 1000.");
+  }
+  if (!Number.isInteger(config.telegram.retryCount) || config.telegram.retryCount < 0) {
+    errors.push("notifications.telegram.retry_count must be a non-negative integer.");
+  }
+  if (!Number.isInteger(config.telegram.retryDelayMs) || config.telegram.retryDelayMs < 0) {
+    errors.push("notifications.telegram.retry_delay_ms must be a non-negative integer.");
+  }
+  errors.push(...validateProxyRequirement(config.telegram.useProxy, config.proxy, "notifications.telegram.use_proxy"));
   return errors;
 }
 
@@ -519,7 +549,7 @@ function validateEmailConfig(config) {
   }
   if (!config.email.from) errors.push("notifications.email.from is required.");
   if (config.email.to.length === 0) errors.push("notifications.email.to is required.");
-  errors.push(...validateProxyRequirement(config.email.useProxy, config.email.proxy, "notifications.email.use_proxy"));
+  errors.push(...validateProxyRequirement(config.email.useProxy, config.proxy, "notifications.email.use_proxy"));
   return errors;
 }
 
@@ -546,6 +576,7 @@ function validateConfig(config) {
       errors.push("metrics.path must start with /.");
     }
   }
+  errors.push(...validateProxyRequirement(config.update.useProxy, config.proxy, "update.use_proxy"));
   errors.push(...validateDestinationConfig(config));
   if (!["off", "email"].includes(config.telegram.fallback)) {
     errors.push("notifications.telegram.fallback must be off or email.");
