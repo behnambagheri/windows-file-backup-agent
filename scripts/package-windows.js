@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const { spawnSync } = require("child_process");
 
 const root = path.resolve(__dirname, "..");
@@ -71,17 +72,8 @@ function zipPackage() {
 }
 
 function writeSha256() {
-  if (process.platform === "win32") {
-    const hash = run("powershell.exe", [
-      "-NoProfile",
-      "-Command",
-      `(Get-FileHash -Algorithm SHA256 '${zipPath.replace(/'/g, "''")}').Hash.ToLower()`
-    ]).trim();
-    fs.writeFileSync(shaPath, `${hash}  backup-agent-windows.zip\n`, "utf8");
-  } else {
-    const hashLine = run("shasum", ["-a", "256", zipPath]).replace(zipPath, "backup-agent-windows.zip");
-    fs.writeFileSync(shaPath, hashLine, "utf8");
-  }
+  const hash = crypto.createHash("sha256").update(fs.readFileSync(zipPath)).digest("hex");
+  fs.writeFileSync(shaPath, `${hash}  backup-agent-windows.zip\n`, "utf8");
 }
 
 const nodeExecutable = findNodeExecutable();
