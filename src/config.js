@@ -1,7 +1,6 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const dotenv = require("dotenv");
 const yaml = require("js-yaml");
 
 const DEFAULT_UPDATE_URL = "https://github.com/behnambagheri/windows-file-backup-agent/releases/latest/download/backup-agent-windows.zip";
@@ -15,8 +14,7 @@ function appDir() {
   }
   if (
     fs.existsSync(path.join(process.cwd(), "config.yaml")) ||
-    fs.existsSync(path.join(process.cwd(), "config.yml")) ||
-    fs.existsSync(path.join(process.cwd(), ".env"))
+    fs.existsSync(path.join(process.cwd(), "config.yml"))
   ) {
     return process.cwd();
   }
@@ -25,15 +23,13 @@ function appDir() {
 
 function readConfigFile() {
   const directory = appDir();
-  const configured = process.env.CONFIG_FILE || process.env.BACKUP_AGENT_CONFIG || process.env.ENV_FILE;
+  const configured = process.env.CONFIG_FILE || process.env.BACKUP_AGENT_CONFIG;
   const candidates = [
     configured,
     path.join(process.cwd(), "config.yaml"),
     path.join(process.cwd(), "config.yml"),
     path.join(directory, "config.yaml"),
-    path.join(directory, "config.yml"),
-    path.join(process.cwd(), ".env"),
-    path.join(directory, ".env")
+    path.join(directory, "config.yml")
   ].filter(Boolean);
 
   const configFile = candidates.find((candidate) => fs.existsSync(candidate));
@@ -46,23 +42,12 @@ function readConfigFile() {
   }
 
   const content = fs.readFileSync(configFile, "utf8");
-  if (isYamlConfigFile(configFile)) {
-    return {
-      configFile,
-      kind: "yaml",
-      data: yaml.load(content) || {}
-    };
-  }
-
+  const data = yaml.load(content) || {};
   return {
     configFile,
-    kind: "env",
-    data: dotenv.parse(content)
+    kind: "yaml",
+    data: data && typeof data === "object" && !Array.isArray(data) ? data : {}
   };
-}
-
-function isYamlConfigFile(configFile) {
-  return /\.ya?ml($|\.)/i.test(path.basename(configFile));
 }
 
 function isSet(value) {
@@ -319,21 +304,6 @@ function normalizeSource(root, defaults, item, index, stateDir) {
   };
 }
 
-function legacySourceFromEnv(root, stateDir) {
-  return normalizeSource(root, {
-    source_dir: setting(root, {}, ["SOURCE_DIR", "SOURCE_DIRECTORY"]),
-    source_file_pattern: setting(root, {}, ["SOURCE_FILE_PATTERN", "SOURCE_FORMAT", "SOURCE_FILE_FORMAT"], "*.bak"),
-    latest_only: setting(root, {}, ["SOURCE_LATEST_ONLY", "LATEST_SOURCE_ONLY"], true),
-    min_age_seconds: setting(root, {}, ["SOURCE_MIN_AGE_SECONDS"], 10),
-    delete_on_success: setting(root, {}, ["DELETE_SOURCE_ON_SUCCESS", "DELETE_SOURCE_AFTER_SUCCESS"], false),
-    compression: setting(root, {}, ["COMPRESSION", "COMPRESSION_ENABLED"], false),
-    retention_policy: setting(root, {}, ["RETENTION_POLICY", "SOURCE_RETENTION_POLICY"], "off"),
-    retention_time: setting(root, {}, ["RETENTION_TIME", "SOURCE_RETENTION_TIME", "RETENTION_MINUTES", "SOURCE_RETENTION_MINUTES"], "off"),
-    retention_count: setting(root, {}, ["RETENTION_COUNT", "SOURCE_RETENTION_COUNT"], ""),
-    skip_already_transferred: setting(root, {}, ["SKIP_ALREADY_TRANSFERRED"], true)
-  }, { name: "default" }, 0, stateDir);
-}
-
 function loadConfig() {
   const { configFile, kind, data } = readConfigFile();
   const root = data || {};
@@ -355,16 +325,13 @@ function loadConfig() {
   const runOnceOverride = envSetting(["RUN_ONCE"], "");
   const runOnStartOverride = envSetting(["RUN_ON_START"], "");
   const { defaults, items } = sourceItems(root);
-  const normalizedSources = items.length > 0
-    ? items.map((item, index) => normalizeSource(root, defaults, item || {}, index, stateDir))
-    : [legacySourceFromEnv(root, stateDir)];
+  const normalizedSources = items.map((item, index) => normalizeSource(root, defaults, item || {}, index, stateDir));
 
   const config = {
     app: {
       name: stringValue(setting(app, root, ["name", "APP_NAME"], "backup-agent")),
       hostname: stringValue(setting(app, root, ["hostname", "HOSTNAME", "SOURCE_HOSTNAME"], os.hostname()), os.hostname()),
       configFile,
-      envFile: configFile,
       configKind: kind,
       appDir: directory,
       logsDir,
@@ -374,11 +341,12 @@ function loadConfig() {
       cron: stringValue(setting(schedule, root, ["cron", "cron_schedule", "CRON_SCHEDULE", "SOURCE_CHECK_CRON"], "0 */5 * * * *")),
       runOnStart: boolValue(runOnStartOverride || setting(schedule, root, ["run_on_start", "RUN_ON_START"], true), true),
       lockFile: path.join(stateDir, "agent.lock"),
-      stateFile: path.join(stateDir, "transferred.json")
+      stateFile: path.join(stateDir, "transferred.json"),
+      progressFile: path.join(stateDir, "progress.json")
     },
     sources: normalizedSources,
-    source: normalizedSources[0],
-    compression: normalizedSources[0].compression,
+    source: normalizedSources[0] || null,
+    compression: normalizedSources[0] ? normalizedSources[0].compression : { enabled: false, level: 9 },
     metrics: {
       enabled: boolValue(setting(metrics, root, ["enabled", "METRICS_ENABLED"], false), false),
       host: stringValue(setting(metrics, root, ["host", "METRICS_HOST"], "0.0.0.0")),

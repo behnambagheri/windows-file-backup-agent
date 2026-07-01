@@ -3,7 +3,8 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { listSourceFiles, listDirectorySource } = require("../src/transfer");
+const { readProgress } = require("../src/progress");
+const { listSourceFiles, listDirectorySource, runTransferCycle } = require("../src/transfer");
 
 function logger() {
   return {
@@ -98,5 +99,29 @@ test("directory source produces one recursive transfer item", async () => {
     assert.ok(items[0].directories.some((entry) => entry.relativePath === "empty"));
     assert.ok(items[0].directories.some((entry) => entry.relativePath === "nested"));
     assert.ok(items[0].fingerprint);
+  });
+});
+
+test("transfer cycle writes completed progress when no source items match", async () => {
+  await withTempDir(async (directory) => {
+    const stateDir = path.join(directory, "state");
+    const testSource = source({ dir: directory, pattern: "*.bak" });
+    const config = {
+      app: {
+        name: "backup-agent",
+        stateDir,
+        stateFile: path.join(stateDir, "transferred.json"),
+        progressFile: path.join(stateDir, "progress.json")
+      },
+      source: testSource,
+      sources: [testSource]
+    };
+
+    const results = await runTransferCycle(config, logger());
+    const progress = readProgress(config);
+
+    assert.deepEqual(results, []);
+    assert.equal(progress.status, "completed");
+    assert.equal(progress.totals.items, 0);
   });
 });

@@ -7,6 +7,7 @@ const tar = require("tar");
 const { pipeline } = require("stream/promises");
 const { Client } = require("ssh2");
 const { SocksClient } = require("socks");
+const { ProgressTracker } = require("./progress");
 
 function wildcardToRegex(pattern) {
   const normalized = pattern.includes("*") || pattern.includes("?") ? pattern : `*${pattern}`;
@@ -369,7 +370,7 @@ async function ensureRemoteDir(sftp, remoteDir) {
   }
 }
 
-function uploadFile(sftp, localPath, remotePath) {
+function uploadFile(sftp, localPath, remotePath, onProgress = () => {}) {
   return new Promise((resolve, reject) => {
     const readStream = fs.createReadStream(localPath);
     const writeStream = sftp.createWriteStream(remotePath, { flags: "w", mode: 0o600 });
@@ -377,6 +378,7 @@ function uploadFile(sftp, localPath, remotePath) {
     readStream.once("error", reject);
     writeStream.once("error", reject);
     writeStream.once("close", resolve);
+    readStream.on("data", (chunk) => onProgress(chunk.length));
     readStream.pipe(writeStream);
   });
 }
@@ -408,7 +410,7 @@ function sftpRename(sftp, from, to) {
   });
 }
 
-async function prepareUploadFile(config, item, source, logger) {
+async function prepareUploadFile(config, item, source, logger, tracker) {
   const compression = source.compression || { enabled: false, level: 9 };
   if (!compression.enabled) {
     return {
@@ -424,6 +426,11 @@ async function prepareUploadFile(config, item, source, logger) {
   }
 
   await fs.promises.mkdir(compression.tempDir, { recursive: true });
+  if (tracker) {
+    tracker.setCurrentPhase("compressing", {
+      detail: item.kind === "directory" ? "creating tar.gz archive" : "creating gzip file"
+    }, true);
+  }
 
   if (item.kind === "directory") {
     const archiveName = `${safePathSegment(item.name)}.tar.gz`;
@@ -510,7 +517,7 @@ async function prepareUploadFile(config, item, source, logger) {
   };
 }
 
-async function uploadDirectory(sftp, prepared, remoteRoot, logger, source) {
+async function uploadDirectory(sftp, prepared, remoteRoot, logger, source, item, tracker) {
   await ensureRemoteDir(sftp, remoteRoot);
   for (const directory of prepared.directories) {
     await ensureRemoteDir(sftp, posix.join(remoteRoot, directory.relativePath));
@@ -527,7 +534,14 @@ async function uploadDirectory(sftp, prepared, remoteRoot, logger, source) {
       remote: remotePath,
       size: file.size
     });
-    await uploadFile(sftp, file.path, tempPath);
+    if (tracker) {
+      tracker.setCurrentPhase("uploading", { detail: file.relativePath });
+    }
+    await uploadFile(sftp, file.path, tempPath, (bytes) => {
+      if (tracker) {
+        tracker.addBytes(source, item, bytes);
+      }
+    });
     await sftpRename(sftp, tempPath, remotePath);
     index += 1;
   }
@@ -552,19 +566,32 @@ async function deleteTransferredSource(item, source, logger) {
   });
 }
 
-async function transferOne(config, item, source, logger) {
+async function transferOne(config, item, source, logger, tracker) {
   let conn;
   let prepared;
   let remotePath;
   try {
-    prepared = await prepareUploadFile(config, item, source, logger);
+    if (tracker) {
+      tracker.startItem(source, item);
+    }
+    prepared = await prepareUploadFile(config, item, source, logger, tracker);
     const remoteDir = destinationDirForFile(config, new Date());
     remotePath = posix.join(remoteDir, prepared.remoteName);
+    if (tracker) {
+      tracker.setCurrentPhase("connecting", {
+        remotePath,
+        bytesTotal: prepared.uploadSize,
+        compressed: prepared.compressed
+      }, true);
+    }
     conn = await connectSsh(config);
     const sftp = await openSftp(conn);
     await ensureRemoteDir(sftp, remoteDir);
 
     if (prepared.directory) {
+      if (tracker) {
+        tracker.setUpload(source, item, remotePath, prepared.uploadSize, prepared.compressed);
+      }
       logger.info("Starting recursive SFTP directory upload", {
         source: sourceLabel(source),
         local: item.path,
@@ -572,9 +599,12 @@ async function transferOne(config, item, source, logger) {
         files: prepared.files.length,
         size: prepared.uploadSize
       });
-      await uploadDirectory(sftp, prepared, remotePath, logger, source);
+      await uploadDirectory(sftp, prepared, remotePath, logger, source, item, tracker);
     } else {
       const tempPath = `${remotePath}.part-${process.pid}-${Date.now()}`;
+      if (tracker) {
+        tracker.setUpload(source, item, remotePath, prepared.uploadSize, prepared.compressed);
+      }
       logger.info("Starting SFTP upload", {
         source: sourceLabel(source),
         local: prepared.localPath,
@@ -583,13 +613,20 @@ async function transferOne(config, item, source, logger) {
         size: prepared.uploadSize,
         compressed: prepared.compressed
       });
-      await uploadFile(sftp, prepared.localPath, tempPath);
+      await uploadFile(sftp, prepared.localPath, tempPath, (bytes) => {
+        if (tracker) {
+          tracker.addBytes(source, item, bytes);
+        }
+      });
       await sftpRename(sftp, tempPath, remotePath);
     }
 
+    if (tracker) {
+      tracker.setCurrentPhase("deleting", {}, true);
+    }
     await deleteTransferredSource(item, source, logger);
 
-    return {
+    const result = {
       success: true,
       sourceName: sourceLabel(source),
       sourceMode: source.mode,
@@ -599,8 +636,12 @@ async function transferOne(config, item, source, logger) {
       compressionFormat: prepared.compressionFormat,
       uploadSize: prepared.uploadSize
     };
+    if (tracker) {
+      tracker.finishItem(source, item, result);
+    }
+    return result;
   } catch (error) {
-    return {
+    const result = {
       success: false,
       sourceName: sourceLabel(source),
       sourceMode: source.mode,
@@ -611,6 +652,10 @@ async function transferOne(config, item, source, logger) {
       compressionFormat: prepared ? prepared.compressionFormat : undefined,
       uploadSize: prepared ? prepared.uploadSize : undefined
     };
+    if (tracker) {
+      tracker.failItem(source, item, result);
+    }
+    return result;
   } finally {
     if (prepared) {
       await prepared.cleanup();
@@ -801,8 +846,7 @@ function saveState(config, state) {
   fs.writeFileSync(config.app.stateFile, JSON.stringify(state, null, 2), "utf8");
 }
 
-async function runSource(config, state, logger, source) {
-  const items = await listSourceItems(config, state, logger, source);
+async function runSourceItems(config, state, logger, source, items, tracker) {
   if (items.length === 0) {
     logger.info("No matching source items found", { source: sourceLabel(source), mode: source.mode });
     await runRetentionCleanup(config, logger, new Set(), source);
@@ -811,7 +855,7 @@ async function runSource(config, state, logger, source) {
 
   const results = [];
   for (const item of items) {
-    const result = await transferOne(config, item, source, logger);
+    const result = await transferOne(config, item, source, logger, tracker);
     if (result.success) {
       state.transferred[item.fingerprint] = {
         source: sourceLabel(source),
@@ -852,16 +896,41 @@ async function runSource(config, state, logger, source) {
   return results;
 }
 
+async function runSource(config, state, logger, source, tracker) {
+  const items = await listSourceItems(config, state, logger, source);
+  return runSourceItems(config, state, logger, source, items, tracker);
+}
+
 async function runTransferCycle(config, logger) {
   const state = loadState(config);
   const sources = Array.isArray(config.sources) && config.sources.length > 0
     ? config.sources
-    : [config.source];
+    : [config.source].filter(Boolean);
+  const tracker = new ProgressTracker(config, logger);
+  tracker.startCycle(sources);
+  const plannedBySource = [];
+  const plannedItems = [];
   const results = [];
 
-  for (const source of sources) {
-    const sourceResults = await runSource(config, state, logger, source);
-    results.push(...sourceResults);
+  try {
+    for (const source of sources) {
+      const items = await listSourceItems(config, state, logger, source);
+      plannedBySource.push({ source, items });
+      for (const item of items) {
+        plannedItems.push({ source, item });
+      }
+    }
+
+    tracker.setQueue(plannedItems);
+
+    for (const { source, items } of plannedBySource) {
+      const sourceResults = await runSourceItems(config, state, logger, source, items, tracker);
+      results.push(...sourceResults);
+    }
+    tracker.finishCycle(results.every((result) => result.success));
+  } catch (error) {
+    tracker.finishCycle(false);
+    throw error;
   }
 
   return results;

@@ -28,27 +28,36 @@ function Remove-PathEntry {
     }
 }
 
-function Get-DotEnvValue {
+function Get-AgentMetricsRuleName {
     param(
-        [string]$Path,
-        [string]$Name,
-        [string]$Default = ""
+        [string]$InstallDir,
+        [string]$Default = "backup-agent metrics"
     )
 
-    if (!(Test-Path $Path)) {
+    $NodeExe = Join-Path $InstallDir "node\node.exe"
+    $ConfigModule = Join-Path $InstallDir "app\src\config.js"
+    if (!(Test-Path $NodeExe) -or !(Test-Path $ConfigModule)) {
         return $Default
     }
 
-    $Match = Get-Content $Path | Where-Object { $_ -match "^\s*$([regex]::Escape($Name))\s*=" } | Select-Object -Last 1
-    if (!$Match) {
-        return $Default
+    $OldAgentHome = $env:AGENT_HOME
+    try {
+        $env:AGENT_HOME = $InstallDir
+        $RuleName = & $NodeExe -e "const { loadConfig } = require(process.argv[1]); const config = loadConfig(); console.log(config.metrics.firewallRuleName || process.argv[2]);" $ConfigModule $Default
+        if ($LASTEXITCODE -ne 0 -or !$RuleName) {
+            return $Default
+        }
+        return ([string]$RuleName).Trim()
+    } finally {
+        if ($null -eq $OldAgentHome) {
+            Remove-Item Env:\AGENT_HOME -ErrorAction SilentlyContinue
+        } else {
+            $env:AGENT_HOME = $OldAgentHome
+        }
     }
-
-    return (($Match -split "=", 2)[1]).Trim().Trim("'").Trim('"')
 }
 
-$EnvPath = Join-Path $InstallDir ".env"
-$MetricsRuleName = Get-DotEnvValue -Path $EnvPath -Name "METRICS_FIREWALL_RULE_NAME" -Default "backup-agent metrics"
+$MetricsRuleName = Get-AgentMetricsRuleName -InstallDir $InstallDir
 
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue

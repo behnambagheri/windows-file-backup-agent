@@ -69,7 +69,7 @@ backup-agent health
 backup-agent logs -f
 ```
 
-Upgrades preserve an existing `config.yaml`. If an older installation only has `.env`, the agent can still read it as a legacy fallback, but new installs use YAML.
+Upgrades preserve an existing `config.yaml`. New installs and current releases use YAML configuration only.
 
 ## Commands
 
@@ -77,6 +77,9 @@ Upgrades preserve an existing `config.yaml`. If an older installation only has `
 backup-agent help
 backup-agent status
 backup-agent health
+backup-agent progress
+backup-agent progress -f
+backup-agent progress --json
 backup-agent logs
 backup-agent logs -f
 backup-agent logs --lines 200
@@ -100,7 +103,7 @@ backup-agent uninstall --remove-data
 backup-agent version
 ```
 
-`edit-config` opens the active config file in elevated Notepad. `edit-env` is still accepted as a compatibility alias. Telegram and email test commands send a real diagnostic message even when their notification mode is `off`. The destination test connects over SSH/SFTP, ensures the remote directory exists, writes/verifies a temporary file, and removes it.
+`edit-config` opens the active config file in elevated Notepad. `progress` prints the latest transfer queue and upload state, `progress -f` refreshes it live, and `progress --json` prints the full progress state for scripts. Telegram and email test commands send a real diagnostic message even when their notification mode is `off`. The destination test connects over SSH/SFTP, ensures the remote directory exists, writes/verifies a temporary file, and removes it.
 
 Run `start`, `stop`, `restart`, `update`, and `uninstall` from an elevated PowerShell window when the task was installed as `SYSTEM`.
 
@@ -167,6 +170,26 @@ Examples:
 - `0 */5 * * * *`: every 5 minutes.
 - `0 0 * * * *`: every hour.
 - `0 30 2 * * *`: every day at 02:30.
+
+Scheduled cycles do not overlap. If a cron tick fires while the previous transfer cycle is still running, backup-agent logs a warning and skips that tick. A process-level lock file also prevents a second agent process from running at the same time.
+
+## Live Progress
+
+The agent writes live transfer state to:
+
+```text
+C:\ProgramData\backup-agent\state\progress.json
+```
+
+Use:
+
+```powershell
+backup-agent progress
+backup-agent progress -f
+backup-agent progress --json
+```
+
+The progress view includes the active cycle status, current item, queued items, completed items, failed items, total upload bytes, transferred bytes, remaining bytes, and percentage. During compression it shows `compressing`; upload percentages start once the final upload size is known.
 
 ## Source Modes
 
@@ -426,7 +449,7 @@ Copy-Item (Get-Command node).Source .runtime\windows-node\node.exe
 npm run package:win
 ```
 
-This creates `backup-agent-windows.zip` and `backup-agent-windows.sha256`. Generated packages, dependencies, local `.env`/`config.yaml` files, IDE metadata, logs, and runtime state are excluded from Git.
+This creates `backup-agent-windows.zip` and `backup-agent-windows.sha256`. Generated packages, dependencies, local `config.yaml` files, IDE metadata, logs, and runtime state are excluded from Git.
 
 ## GitHub Actions
 

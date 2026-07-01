@@ -111,16 +111,13 @@ Copy-Item -Force (Join-Path $SourceDir "uninstall.ps1") (Join-Path $InstallDir "
 Copy-Item -Force $ConfigExampleSource (Join-Path $InstallDir "config.yaml.example")
 
 $InstalledConfig = Join-Path $InstallDir "config.yaml"
-$InstalledLegacyEnv = Join-Path $InstallDir ".env"
 if (Test-Path $ConfigSource) {
     Copy-Item -Force $ConfigSource $InstalledConfig
-} elseif (!(Test-Path $InstalledConfig) -and !(Test-Path $InstalledLegacyEnv)) {
+} elseif (!(Test-Path $InstalledConfig)) {
     Copy-Item -Force $ConfigExampleSource $InstalledConfig
-} elseif (!(Test-Path $InstalledConfig) -and (Test-Path $InstalledLegacyEnv)) {
-    Write-Host "Keeping existing legacy .env config. Create config.yaml to use the YAML format."
 }
 
-$ActiveConfig = if (Test-Path $InstalledConfig) { $InstalledConfig } elseif (Test-Path $InstalledLegacyEnv) { $InstalledLegacyEnv } else { $InstalledConfig }
+$ActiveConfig = $InstalledConfig
 $MetricsConfig = Get-AgentMetricsConfig -InstallDir $InstallDir
 Ensure-MetricsFirewallRule -Metrics $MetricsConfig
 

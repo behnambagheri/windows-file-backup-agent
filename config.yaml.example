@@ -20,7 +20,7 @@ logging:
   dir: ''
 
 state:
-  # Stores the lock file, transfer history, and temporary compressed files.
+  # Stores the lock file, transfer history, live progress, and temporary compressed files.
   # Leave empty to use <install-directory>\state.
   # Example: 'D:\backup-agent\state'
   dir: ''
@@ -28,6 +28,7 @@ state:
 schedule:
   # Six-field cron expression: second minute hour day-of-month month day-of-week.
   # Examples: every 5 minutes = '0 */5 * * * *'; daily at 02:30 = '0 30 2 * * *'.
+  # If a previous cycle is still running, the next cron tick is skipped instead of overlapping.
   cron: '0 */5 * * * *'
 
   # Run one transfer cycle immediately when the service starts.

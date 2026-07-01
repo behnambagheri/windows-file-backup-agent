@@ -9,7 +9,6 @@ const DEFAULT_UPDATE_URL = "https://github.com/behnambagheri/windows-file-backup
 const isolatedEnvironmentKeys = [
   "CONFIG_FILE",
   "BACKUP_AGENT_CONFIG",
-  "ENV_FILE",
   "AGENT_HOME",
   "RUN_ONCE",
   "RUN_ON_START",
@@ -305,22 +304,22 @@ notifications:
   });
 });
 
-test("legacy .env files are still accepted as a fallback format", () => {
-  const content = [
-    "SOURCE_DIR=C:\\Backups",
-    "SOURCE_FILE_PATTERN=*.bak",
-    "DEST_HOST=192.0.2.10",
-    "DEST_PORT=22",
-    "DEST_USER=backup-user",
-    "DEST_REMOTE_DIR=/backups",
-    "DEST_AUTH_METHOD=password",
-    "DEST_PASSWORD=secret"
-  ].join("\n");
+test("YAML config must define at least one source item", () => {
+  const content = String.raw`
+destination:
+  host: '192.0.2.10'
+  port: 22
+  user: backup-user
+  remote_dir: /backups
+  auth_method: password
+  password: secret
+sources:
+  items: []
+`;
 
   withTestConfig(content, (config) => {
-    assert.equal(config.app.configKind, "env");
-    assert.equal(config.source.dir, "C:\\Backups");
-    assert.equal(config.source.pattern, "*.bak");
-    assert.deepEqual(validateConfig(config), []);
-  }, ".env");
+    assert.equal(config.app.configKind, "yaml");
+    assert.equal(config.sources.length, 0);
+    assert.ok(validateConfig(config).includes("sources.items must contain at least one source."));
+  });
 });

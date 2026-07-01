@@ -14,6 +14,7 @@ const {
 } = require("./config");
 const { createLogger } = require("./logger");
 const { testTelegram, testEmail } = require("./notifications");
+const { readProgress, formatProgress } = require("./progress");
 const { testDestination } = require("./transfer");
 const packageInfo = require("../package.json");
 
@@ -26,6 +27,9 @@ Usage:
   backup-agent help
   backup-agent status
   backup-agent health
+  backup-agent progress
+  backup-agent progress -f
+  backup-agent progress --json
   backup-agent logs [--lines 100]
   backup-agent logs -f [--lines 100]
   backup-agent start
@@ -48,7 +52,7 @@ Usage:
 
 Notes:
   edit-config opens the active YAML config in elevated Notepad.
-  edit-env is kept as a compatibility alias for edit-config.
+  progress shows the current transfer cycle, queue, completed items, and upload bytes.
   Notification tests send a real test message even when the notification mode is off.
   The destination test writes, verifies, and removes a temporary file over SFTP.
   start, stop, restart, update, and uninstall should be run from an
@@ -126,6 +130,7 @@ function printStatus() {
   console.log(`Config: ${config.app.configFile}`);
   console.log(`Config type: ${config.app.configKind}`);
   console.log(`Logs: ${path.join(config.app.logsDir, "agent.log")}`);
+  console.log(`Progress: ${config.app.progressFile}`);
 
   if (!isWindows()) {
     console.log("Task: unavailable on this OS");
@@ -272,6 +277,7 @@ function health() {
   console.log(`Config: ${config.app.configFile}`);
   console.log(`Config type: ${config.app.configKind}`);
   console.log(`Logs: ${path.join(config.app.logsDir, "agent.log")}`);
+  console.log(`Progress: ${config.app.progressFile}`);
   console.log(`Hostname: ${config.app.hostname}`);
   console.log(`Create destination directory: ${config.destination.createDir ? config.destination.dirFormat : "disabled"}`);
   console.log(`Sources: ${config.sources.length}`);
@@ -310,6 +316,51 @@ function health() {
   console.log("Health: OK");
 }
 
+function printProgressSnapshot(config, jsonOutput) {
+  const progress = readProgress(config);
+  if (jsonOutput) {
+    console.log(JSON.stringify(progress || {
+      status: "unknown",
+      progressFile: config.app.progressFile
+    }, null, 2));
+    return;
+  }
+
+  if (!progress) {
+    console.log(`No progress file exists yet: ${config.app.progressFile}`);
+    console.log("Start the agent or run backup-agent run-once to create one.");
+    return;
+  }
+
+  console.log(formatProgress(progress));
+}
+
+function progressCommand(args) {
+  const config = loadConfig();
+  const jsonOutput = args.includes("--json");
+  const follow = args.includes("-f") || args.includes("--follow");
+
+  if (!follow) {
+    printProgressSnapshot(config, jsonOutput);
+    return;
+  }
+
+  if (jsonOutput) {
+    console.error("Use either --json or --follow, not both.");
+    process.exit(2);
+  }
+
+  const render = () => {
+    process.stdout.write("\x1Bc");
+    printProgressSnapshot(config, false);
+    console.log("");
+    console.log("Refreshing every 1s. Press Ctrl+C to stop.");
+  };
+
+  render();
+  setInterval(render, 1000);
+}
+
 function runOnce() {
   const node = process.execPath;
   const script = path.join(__dirname, "index.js");
@@ -326,41 +377,6 @@ function parseOption(args, names, fallback = "") {
     }
   }
   return fallback;
-}
-
-function isYamlConfigFile(configFile) {
-  return /\.ya?ml($|\.)/i.test(path.basename(configFile));
-}
-
-function setEnvValues(envFile, updates) {
-  let content = "";
-  if (fs.existsSync(envFile)) {
-    content = fs.readFileSync(envFile, "utf8");
-  }
-  const lines = content ? content.split(/\r?\n/) : [];
-  const applied = new Set();
-  const next = lines.map((line) => {
-    const match = line.match(/^([A-Za-z0-9_-]+)\s*=/);
-    if (!match) {
-      return line;
-    }
-    const key = match[1];
-    if (!Object.prototype.hasOwnProperty.call(updates, key)) {
-      return line;
-    }
-    applied.add(key);
-    return `${key}=${updates[key]}`;
-  });
-
-  if (next.length && next[next.length - 1] !== "") {
-    next.push("");
-  }
-  for (const [key, value] of Object.entries(updates)) {
-    if (!applied.has(key)) {
-      next.push(`${key}=${value}`);
-    }
-  }
-  fs.writeFileSync(envFile, `${next.join("\n").replace(/\n+$/, "")}\n`, "utf8");
 }
 
 function setNestedValue(target, dottedPath, value) {
@@ -382,11 +398,11 @@ function ensureConfigFile(configFile) {
   }
   fs.mkdirSync(path.dirname(configFile), { recursive: true });
   const exampleFile = path.join(appDir(), "config.yaml.example");
-  if (fs.existsSync(exampleFile) && isYamlConfigFile(configFile)) {
+  if (fs.existsSync(exampleFile)) {
     fs.copyFileSync(exampleFile, configFile);
     return;
   }
-  fs.writeFileSync(configFile, isYamlConfigFile(configFile) ? "{}\n" : "", "utf8");
+  fs.writeFileSync(configFile, "{}\n", "utf8");
 }
 
 function setYamlValues(configFile, updates) {
@@ -404,11 +420,7 @@ function setYamlValues(configFile, updates) {
 }
 
 function setConfigValues(configFile, updates) {
-  if (isYamlConfigFile(configFile)) {
-    setYamlValues(configFile, updates);
-    return;
-  }
-  setEnvValues(configFile, updates);
+  setYamlValues(configFile, updates);
 }
 
 function restartAfterConfigChange() {
@@ -450,26 +462,14 @@ function metricsCommand(args) {
       console.error("Metrics path must start with /.");
       process.exit(2);
     }
-    const yamlConfig = isYamlConfigFile(config.app.configFile);
-    const updates = yamlConfig
-      ? {
-        "metrics.enabled": true,
-        "metrics.host": host,
-        "metrics.port": parsedPort,
-        "metrics.path": metricsPath
-      }
-      : {
-        METRICS_ENABLED: "true",
-        METRICS_HOST: host,
-        METRICS_PORT: String(parsedPort),
-        METRICS_PATH: metricsPath
-      };
+    const updates = {
+      "metrics.enabled": true,
+      "metrics.host": host,
+      "metrics.port": parsedPort,
+      "metrics.path": metricsPath
+    };
     if (args.includes("--firewall")) {
-      if (yamlConfig) {
-        updates["metrics.firewall_rule"] = true;
-      } else {
-        updates.METRICS_FIREWALL_RULE = "true";
-      }
+      updates["metrics.firewall_rule"] = true;
     }
     setConfigValues(config.app.configFile, updates);
     console.log(`Metrics enabled in ${config.app.configFile}: ${host}:${port}${metricsPath}`);
@@ -487,9 +487,7 @@ function metricsCommand(args) {
   }
 
   if (subcommand === "disable") {
-    const updates = isYamlConfigFile(config.app.configFile)
-      ? { "metrics.enabled": false }
-      : { METRICS_ENABLED: "false" };
+    const updates = { "metrics.enabled": false };
     setConfigValues(config.app.configFile, updates);
     console.log(`Metrics disabled in ${config.app.configFile}`);
     restartAfterConfigChange();
@@ -779,6 +777,9 @@ async function main() {
     case "health":
       health();
       break;
+    case "progress":
+      progressCommand(args);
+      break;
     case "logs":
       tailLog(parseLines(args), args.includes("-f") || args.includes("--follow"));
       break;
@@ -793,8 +794,6 @@ async function main() {
       break;
     case "edit-config":
     case "editconfig":
-    case "edit-env":
-    case "editenv":
       editConfig();
       break;
     case "metrics":
